@@ -1,7 +1,6 @@
 package com.rork.quizroyaleshowdown.data
 
 import android.util.Log
-import com.rork.quizroyaleshowdown.Config
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.okhttp.OkHttp
@@ -24,9 +23,6 @@ import java.net.URLEncoder
 
 private const val TAG = "GameClient"
 
-/** Fallback keeps the app functional even if the env var is not inlined. */
-private const val FALLBACK_BACKEND = "https://quiz-royale-showdown-backend.rork.app"
-
 /**
  * Transport for the match protocol: a small HTTP call to find a room, then a
  * persistent WebSocket carrying typed [ClientMessage] / [ServerMessage] frames.
@@ -44,10 +40,7 @@ class GameClient {
         install(ContentNegotiation) { json(json) }
     }
 
-    private val baseUrl: String
-        get() = Config.EXPO_PUBLIC_RORK_FUNCTIONS_URL
-            .ifBlank { FALLBACK_BACKEND }
-            .trimEnd('/')
+    private val baseUrl: String get() = Backend.baseUrl
 
     /** Asks the matchmaker which room to join for [mode]. */
     suspend fun findMatch(mode: GameMode, playerId: String): MatchmakeResponse {
@@ -60,24 +53,27 @@ class GameClient {
     /**
      * Opens the match socket and emits every decoded server message until the
      * connection closes. Cancelling the collecting coroutine closes the socket.
+     *
+     * Only a credential is sent — the server resolves it into the trusted player
+     * identity, so the client cannot choose who it plays as.
      */
     fun connect(
         roomId: String,
-        playerId: String,
+        credentials: MatchCredentials,
         name: String,
         mode: GameMode,
         outbound: OutboundQueue
     ): Flow<ServerMessage> = flow {
-        val wsBase = baseUrl
-            .replaceFirst("https://", "wss://")
-            .replaceFirst("http://", "ws://")
-        val query = listOf(
-            "playerId" to playerId,
-            "name" to name,
-            "mode" to mode.name
-        ).joinToString("&") { (k, v) -> "$k=${URLEncoder.encode(v, "UTF-8")}" }
+        val params = buildList {
+            credentials.token?.let { add("token" to it) }
+            credentials.guestId?.let { add("guestId" to it) }
+            add("name" to name)
+            add("mode" to mode.name)
+        }
+        val query = params.joinToString("&") { (k, v) -> "$k=${URLEncoder.encode(v, "UTF-8")}" }
 
-        val session: WebSocketSession = http.webSocketSession("$wsBase/match/$roomId?$query")
+        val session: WebSocketSession =
+            http.webSocketSession("${Backend.webSocketBase}/match/$roomId?$query")
 
         outbound.bind(session, json)
         try {

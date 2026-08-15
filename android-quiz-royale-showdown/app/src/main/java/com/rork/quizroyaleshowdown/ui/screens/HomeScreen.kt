@@ -26,9 +26,13 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
-import androidx.compose.material.icons.filled.EmojiEvents
-import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.EmojiEvents
+import androidx.compose.material.icons.filled.HourglassEmpty
+import androidx.compose.material.icons.filled.Leaderboard
+import androidx.compose.material.icons.filled.PersonAddAlt1
+import androidx.compose.material.icons.filled.School
+import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
@@ -53,25 +57,36 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.rork.quizroyaleshowdown.data.AuthViewModel
 import com.rork.quizroyaleshowdown.data.GameMode
+import com.rork.quizroyaleshowdown.data.Identity
 import com.rork.quizroyaleshowdown.data.MODE_INFO
 import com.rork.quizroyaleshowdown.data.ModeInfo
-import com.rork.quizroyaleshowdown.data.PlayerPrefs
+import com.rork.quizroyaleshowdown.data.PlayerStats
 import com.rork.quizroyaleshowdown.ui.components.ArenaBackground
+import com.rork.quizroyaleshowdown.ui.components.ArenaButton
 import com.rork.quizroyaleshowdown.ui.components.PressableSurface
 import com.rork.quizroyaleshowdown.ui.components.StatBlock
 import com.rork.quizroyaleshowdown.ui.components.TagChip
 import com.rork.quizroyaleshowdown.ui.theme.Arena
-import com.rork.quizroyaleshowdown.ui.theme.DisplayFont
 
 @Composable
 fun HomeScreen(
-    prefs: PlayerPrefs,
-    onPlay: (GameMode) -> Unit
+    authViewModel: AuthViewModel,
+    onPlay: (GameMode) -> Unit,
+    onRegister: () -> Unit,
+    onSignIn: () -> Unit,
+    onLeaderboard: () -> Unit,
+    onProfile: () -> Unit
 ) {
-    var name by remember { mutableStateOf(prefs.playerName) }
-    var editingName by remember { mutableStateOf(false) }
+    val authState by authViewModel.uiState.collectAsStateWithLifecycle()
+    val identity = authState.identity
+    val stats = identity.stats ?: PlayerStats()
     val haptics = LocalHapticFeedback.current
+
+    var name by remember(identity.displayName) { mutableStateOf(identity.displayName) }
+    var editingName by remember { mutableStateOf(false) }
 
     ArenaBackground(accent = Arena.Gold) {
         Column(
@@ -82,11 +97,11 @@ fun HomeScreen(
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 32.dp)
         ) {
-            Spacer(Modifier.height(28.dp))
+            Spacer(Modifier.height(24.dp))
 
             CrownMark()
 
-            Spacer(Modifier.height(18.dp))
+            Spacer(Modifier.height(16.dp))
 
             Text(
                 text = "QUIZ",
@@ -95,7 +110,7 @@ fun HomeScreen(
                         listOf(Arena.GoldBright, Arena.Gold, Arena.GoldDeep)
                     )
                 ),
-                fontSize = 46.sp,
+                fontSize = 44.sp,
                 modifier = Modifier.fillMaxWidth(),
                 textAlign = TextAlign.Center,
                 letterSpacing = 4.sp
@@ -107,7 +122,7 @@ fun HomeScreen(
                         listOf(Arena.GoldBright, Arena.Gold, Arena.GoldDeep)
                     )
                 ),
-                fontSize = 46.sp,
+                fontSize = 44.sp,
                 modifier = Modifier.fillMaxWidth(),
                 textAlign = TextAlign.Center,
                 letterSpacing = 4.sp
@@ -124,24 +139,79 @@ fun HomeScreen(
 
             Spacer(Modifier.height(22.dp))
 
-            NameCard(
+            AccountCard(
+                identity = identity,
                 name = name,
                 editing = editingName,
-                onNameChange = {
-                    name = it
-                    prefs.playerName = it
-                },
+                onNameChange = { name = it },
                 onToggleEdit = {
                     editingName = !editingName
-                    if (!editingName && name.isBlank()) {
-                        name = prefs.playerName
+                    if (!editingName) {
+                        if (name.isBlank()) {
+                            name = identity.displayName
+                        } else {
+                            authViewModel.renameGuest(name)
+                        }
                     }
-                }
+                },
+                onOpenProfile = onProfile
             )
+
+            // The primary conversion moment: a guest is one tap from a permanent
+            // account, and told exactly what they gain.
+            if (!identity.isRegistered) {
+                Spacer(Modifier.height(14.dp))
+                RegisterPrompt(
+                    guestPoints = stats.totalPoints,
+                    onRegister = {
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onRegister()
+                    },
+                    onSignIn = onSignIn
+                )
+            }
 
             Spacer(Modifier.height(14.dp))
 
-            RecordStrip(prefs)
+            RecordStrip(stats)
+
+            Spacer(Modifier.height(12.dp))
+
+            PressableSurface(
+                onClick = onLeaderboard,
+                modifier = Modifier.fillMaxWidth(),
+                background = Arena.Surface.copy(alpha = 0.6f),
+                borderColor = Arena.Violet.copy(alpha = 0.4f),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Leaderboard,
+                        contentDescription = null,
+                        tint = Arena.Violet,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "World & category standings",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Arena.TextHi,
+                            fontWeight = FontWeight.W700
+                        )
+                        Text(
+                            text = "Guests and registered players ranked together",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Arena.TextLow
+                        )
+                    }
+                }
+            }
 
             Spacer(Modifier.height(24.dp))
 
@@ -196,6 +266,87 @@ fun HomeScreen(
     }
 }
 
+/**
+ * The Register call-to-action. Deliberately the loudest control on the page for
+ * a guest, while still leaving guest play completely unblocked.
+ */
+@Composable
+private fun RegisterPrompt(
+    guestPoints: Int,
+    onRegister: () -> Unit,
+    onSignIn: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .background(
+                Brush.horizontalGradient(
+                    listOf(Arena.Gold.copy(alpha = 0.20f), Arena.Violet.copy(alpha = 0.12f))
+                )
+            )
+            .border(1.dp, Arena.Gold.copy(alpha = 0.45f), RoundedCornerShape(20.dp))
+            .padding(16.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Arena.Gold.copy(alpha = 0.2f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.PersonAddAlt1,
+                    contentDescription = null,
+                    tint = Arena.GoldBright,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Make it permanent",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Arena.TextHi
+                )
+                Text(
+                    text = if (guestPoints > 0) {
+                        "Keep your $guestPoints points, add friends, hold your rank."
+                    } else {
+                        "Save your stats forever, add friends, hold your rank."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Arena.TextMid
+                )
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+
+        ArenaButton(text = "Register", onClick = onRegister)
+
+        Spacer(Modifier.height(8.dp))
+
+        PressableSurface(
+            onClick = onSignIn,
+            modifier = Modifier.fillMaxWidth(),
+            background = Color.Transparent,
+            borderColor = Color.Transparent,
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Text(
+                text = "Already have an account? Sign in",
+                style = MaterialTheme.typography.bodySmall,
+                color = Arena.Cyan,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(vertical = 8.dp)
+            )
+        }
+    }
+}
+
 /** Slowly rotating halo behind a crown glyph — the app's signature mark. */
 @Composable
 private fun CrownMark() {
@@ -225,7 +376,7 @@ private fun CrownMark() {
     ) {
         Box(
             modifier = Modifier
-                .size(112.dp)
+                .size(104.dp)
                 .clip(RoundedCornerShape(50))
                 .background(
                     Brush.sweepGradient(
@@ -242,7 +393,7 @@ private fun CrownMark() {
         ) {
             Box(
                 modifier = Modifier
-                    .size(96.dp)
+                    .size(90.dp)
                     .clip(RoundedCornerShape(50))
                     .background(Arena.Canvas),
                 contentAlignment = Alignment.Center
@@ -252,7 +403,7 @@ private fun CrownMark() {
                     contentDescription = null,
                     tint = Arena.GoldBright,
                     modifier = Modifier
-                        .size(46.dp)
+                        .size(44.dp)
                         .alpha(0.6f + sweep / 1200f)
                 )
             }
@@ -260,18 +411,28 @@ private fun CrownMark() {
     }
 }
 
+/**
+ * Shows who the player currently is. A guest can rename themselves inline; a
+ * registered player's name is their username, so the row opens the profile
+ * instead of an editor.
+ */
 @Composable
-private fun NameCard(
+private fun AccountCard(
+    identity: Identity,
     name: String,
     editing: Boolean,
     onNameChange: (String) -> Unit,
-    onToggleEdit: () -> Unit
+    onToggleEdit: () -> Unit,
+    onOpenProfile: () -> Unit
 ) {
+    val registered = identity.isRegistered
+    val accent = if (registered) Arena.Gold else Arena.Cyan
+
     PressableSurface(
-        onClick = onToggleEdit,
+        onClick = { if (registered) onOpenProfile() else onToggleEdit() },
         modifier = Modifier.fillMaxWidth(),
         background = Arena.Surface.copy(alpha = 0.75f),
-        borderColor = if (editing) Arena.Gold else Arena.Outline,
+        borderColor = if (editing) Arena.Gold else accent.copy(alpha = 0.35f),
         shape = RoundedCornerShape(18.dp)
     ) {
         Row(
@@ -281,14 +442,28 @@ private fun NameCard(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "YOUR CALLSIGN",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Arena.TextLow,
-                    letterSpacing = 1.5.sp
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = if (registered) "SIGNED IN AS" else "PLAYING AS GUEST",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Arena.TextLow,
+                        letterSpacing = 1.5.sp
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Icon(
+                        imageVector = if (registered) {
+                            Icons.Filled.Verified
+                        } else {
+                            Icons.Filled.HourglassEmpty
+                        },
+                        contentDescription = null,
+                        tint = accent,
+                        modifier = Modifier.size(12.dp)
+                    )
+                }
                 Spacer(Modifier.height(4.dp))
-                if (editing) {
+
+                if (editing && !registered) {
                     BasicTextField(
                         value = name,
                         onValueChange = { onNameChange(it.take(16)) },
@@ -305,24 +480,38 @@ private fun NameCard(
                     )
                 } else {
                     Text(
-                        text = name,
+                        text = identity.displayName,
                         style = MaterialTheme.typography.headlineSmall,
                         color = Arena.TextHi
                     )
                 }
+
+                if (registered) {
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "Stats saved · tap for profile & friends",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Arena.TextLow
+                    )
+                }
             }
-            Icon(
-                imageVector = Icons.Filled.Edit,
-                contentDescription = if (editing) "Save callsign" else "Edit callsign",
-                tint = if (editing) Arena.Gold else Arena.TextLow,
-                modifier = Modifier.size(20.dp)
-            )
+
+            if (registered) {
+                TagChip(text = "account", color = Arena.Gold)
+            } else {
+                Icon(
+                    imageVector = Icons.Filled.Edit,
+                    contentDescription = if (editing) "Save name" else "Edit name",
+                    tint = if (editing) Arena.Gold else Arena.TextLow,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun RecordStrip(prefs: PlayerPrefs) {
+private fun RecordStrip(stats: PlayerStats) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -334,20 +523,26 @@ private fun RecordStrip(prefs: PlayerPrefs) {
     ) {
         StatBlock(
             label = "Crowns",
-            value = prefs.wins.toString(),
+            value = stats.wins.toString(),
             color = Arena.GoldBright
         )
         VerticalDivider()
         StatBlock(
-            label = "Best Place",
-            value = prefs.bestPlacement.let { if (it == 0) "—" else "#$it" },
-            color = Arena.Cyan
+            label = "Losses",
+            value = stats.losses.toString(),
+            color = Arena.Magenta
         )
         VerticalDivider()
         StatBlock(
-            label = "Best Score",
-            value = prefs.bestScore.toString(),
+            label = "Points",
+            value = stats.totalPoints.toString(),
             color = Arena.TextHi
+        )
+        VerticalDivider()
+        StatBlock(
+            label = "Charges",
+            value = stats.powerUpCharges.toString(),
+            color = Arena.Violet
         )
     }
 }

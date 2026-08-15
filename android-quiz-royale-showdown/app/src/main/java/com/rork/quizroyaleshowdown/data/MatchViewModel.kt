@@ -48,7 +48,17 @@ class MatchViewModel(app: Application) : AndroidViewModel(app) {
     private var recordedResult = false
 
     val playerName: String get() = prefs.playerName
-    val playerId: String get() = prefs.playerId
+
+    /** A session token wins over a guest id, so a signed-in run always banks. */
+    private val credentials: MatchCredentials
+        get() {
+            val token = prefs.sessionToken
+            return if (token != null) {
+                MatchCredentials(token = token, guestId = null)
+            } else {
+                MatchCredentials(token = null, guestId = prefs.guestId)
+            }
+        }
 
     fun startMatch(mode: GameMode) {
         sessionJob?.cancel()
@@ -62,7 +72,7 @@ class MatchViewModel(app: Application) : AndroidViewModel(app) {
             while (isActive && attempt <= MAX_RECONNECT_ATTEMPTS) {
                 try {
                     if (roomId == null) {
-                        val found = client.findMatch(mode, prefs.playerId)
+                        val found = client.findMatch(mode, prefs.deviceId)
                         roomId = found.roomId
                     }
                     _uiState.update {
@@ -75,7 +85,7 @@ class MatchViewModel(app: Application) : AndroidViewModel(app) {
 
                     client.connect(
                         roomId = roomId,
-                        playerId = prefs.playerId,
+                        credentials = credentials,
                         name = prefs.playerName,
                         mode = mode,
                         outbound = outbound

@@ -8,6 +8,8 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { buildQuestionSet, type Question } from "./questions";
+import { callDo, GUEST_REGISTRY_ID, LEADERBOARD_ID, USER_DIRECTORY_ID } from "./do-dispatch";
+import type { MatchOutcome, SubjectKind } from "./identity";
 import {
   ALL_POWER_UPS,
   MODE_CONFIG,
@@ -33,6 +35,14 @@ type PlayerState = {
   id: string;
   name: string;
   isBot: boolean;
+  /**
+   * Which identity store owns this player's record, stamped by the Worker after
+   * it validated their session token or guest id. Null for bots, who have no
+   * persistent identity at all.
+   */
+  subjectKind: SubjectKind | null;
+  /** Points earned per category this match, folded into the category boards. */
+  categoryPoints: Record<string, number>;
   botSkill: number;
   connected: boolean;
   alive: boolean;
@@ -42,6 +52,8 @@ type PlayerState = {
   correctCount: number;
   lives: number;
   placement: number | null;
+  /** Round in which this player was knocked out. Null while still alive. */
+  eliminatedRound: number | null;
   answerIndex: number | null;
   answeredAt: number | null;
   lastAnswerCorrect: boolean | null;
@@ -65,6 +77,8 @@ type MatchState = {
   order: string[];
   winnerId: string | null;
   botsSpawned: boolean;
+  /** Guards against double-crediting stats if the match settles twice. */
+  reported?: boolean;
 };
 
 const BOT_NAMES = [
@@ -97,6 +111,9 @@ export class MatchRoom extends DurableObject<Env> {
 
     const name = sanitizeName(url.searchParams.get("name"));
     const mode = parseMode(url.searchParams.get("mode"));
+    // Trusted: the Worker overwrites this after resolving the caller's identity,
+    // so a client cannot claim to be a registered user.
+    const subjectKind = parseSubjectKind(url.searchParams.get("kind"));
 
     const state = this.ensureState(mode);
 
@@ -106,8 +123,11 @@ export class MatchRoom extends DurableObject<Env> {
     if (existing) {
       existing.connected = true;
       existing.name = name || existing.name;
+      existing.subjectKind = subjectKind;
     } else if (state.phase === "LOBBY" && humanCount(state) < MODE_CONFIG[state.mode].maxPlayers) {
-      state.players[playerId] = newPlayer(playerId, name, false, MODE_CONFIG[state.mode].lives);
+      const player = newPlayer(playerId, name, false, MODE_CONFIG[state.mode].lives);
+      player.subjectKind = subjectKind;
+      state.players[playerId] = player;
       state.order.push(playerId);
     }
 
@@ -324,7 +344,10 @@ export class MatchRoom extends DurableObject<Env> {
         p.correctCount += 1;
         p.streak += 1;
         p.bestStreak = Math.max(p.bestStreak, p.streak);
-        p.score += this.scoreFor(p, cfg.questionMs);
+        const gained = this.scoreFor(p, cfg.questionMs);
+        p.score += gained;
+        p.categoryPoints[question.category] =
+          (p.categoryPoints[question.category] ?? 0) + gained;
       } else {
         p.streak = 0;
         if (state.mode === "PRACTICE") continue;
@@ -337,6 +360,7 @@ export class MatchRoom extends DurableObject<Env> {
           if (p.lives <= 0) {
             p.lives = 0;
             p.alive = false;
+            p.eliminatedRound = state.roundNumber;
             eliminatedThisRound.push(p);
           }
         }
@@ -386,16 +410,87 @@ export class MatchRoom extends DurableObject<Env> {
       .filter((p): p is PlayerState => Boolean(p?.alive))
       .sort((a, b) => b.score - a.score);
 
-    const winner = survivors[0] ?? null;
-    if (winner) {
-      state.winnerId = winner.id;
+    if (survivors.length > 0) {
+      state.winnerId = survivors[0]!.id;
       survivors.forEach((p, i) => {
         p.placement = i + 1;
       });
+    } else {
+      // Total wipeout: everyone was knocked out in the same round, so the round
+      // that ended the match is decided on points. Without this, the shared
+      // "aliveAfter + 1" placement collapses to #1 for players who were actually
+      // eliminated, which would show a champion banner AND bank a loss.
+      const lastRound = state.order.reduce((max, id) => {
+        const round = state.players[id]?.eliminatedRound ?? 0;
+        return round > max ? round : max;
+      }, 0);
+
+      const finalists = state.order
+        .map((id) => state.players[id])
+        .filter((p): p is PlayerState => Boolean(p) && p!.eliminatedRound === lastRound)
+        .sort((a, b) => b.score - a.score);
+
+      if (finalists.length > 0) {
+        state.winnerId = finalists[0]!.id;
+        finalists.forEach((p, i) => {
+          p.placement = i + 1;
+        });
+      }
     }
 
     state.phase = "FINISHED";
     state.phaseEndsAt = Date.now();
+
+    if (!state.reported) {
+      state.reported = true;
+      const outcomes = this.buildOutcomes(state);
+      // Fire-and-forget: the results screen must not wait on stat persistence.
+      this.ctx.waitUntil(this.reportOutcomes(outcomes));
+    }
+    this.persist();
+  }
+
+  /** Converts the final roster into one stat report per human player. */
+  private buildOutcomes(state: MatchState): MatchOutcome[] {
+    const outcomes: MatchOutcome[] = [];
+    for (const id of state.order) {
+      const p = state.players[id];
+      if (!p || p.isBot || !p.subjectKind) continue;
+      outcomes.push({
+        subjectKind: p.subjectKind,
+        subjectId: p.id,
+        displayName: p.name,
+        won: state.winnerId === p.id,
+        placement: p.placement,
+        score: p.score,
+        correctAnswers: p.correctCount,
+        powerUpsUsed: p.spentPowerUps.length,
+        categoryPoints: p.categoryPoints,
+        // Practice is a solo drill — points count, win/loss does not.
+        recordWinLoss: state.mode !== "PRACTICE",
+      });
+    }
+    return outcomes;
+  }
+
+  private async reportOutcomes(outcomes: MatchOutcome[]): Promise<void> {
+    await Promise.all(
+      outcomes.map(async (outcome) => {
+        const [className, instanceId] =
+          outcome.subjectKind === "USER"
+            ? ["UserDirectory", USER_DIRECTORY_ID]
+            : ["GuestRegistry", GUEST_REGISTRY_ID];
+        try {
+          await callDo(this.env, className, instanceId, "/internal/report", {
+            method: "POST",
+            body: { outcome },
+          });
+        } catch (error) {
+          // A stat write failing must never break the match result itself.
+          console.error("stat report failed", outcome.subjectKind, (error as Error)?.message);
+        }
+      }),
+    );
   }
 
   /** Base + speed bonus + streak bonus, adjusted by the round's power-ups. */
@@ -504,6 +599,7 @@ export class MatchRoom extends DurableObject<Env> {
       state.order = state.order.filter((id) => id !== playerId);
     } else if (player.alive && state.mode !== "PRACTICE") {
       player.alive = false;
+      player.eliminatedRound = state.roundNumber;
       const aliveAfter = state.order.filter((id) => state.players[id]?.alive).length;
       player.placement = aliveAfter + 1;
     }
@@ -711,11 +807,17 @@ export class MatchRoom extends DurableObject<Env> {
 
 // ------------------------------------------------------------------ helpers
 
+function parseSubjectKind(raw: string | null): SubjectKind | null {
+  return raw === "USER" || raw === "GUEST" ? raw : null;
+}
+
 function newPlayer(id: string, name: string, isBot: boolean, lives: number): PlayerState {
   return {
     id,
     name,
     isBot,
+    subjectKind: null,
+    categoryPoints: {},
     botSkill: 0.6,
     connected: !isBot,
     alive: true,
@@ -725,6 +827,7 @@ function newPlayer(id: string, name: string, isBot: boolean, lives: number): Pla
     correctCount: 0,
     lives,
     placement: null,
+    eliminatedRound: null,
     answerIndex: null,
     answeredAt: null,
     lastAnswerCorrect: null,

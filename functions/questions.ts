@@ -143,6 +143,10 @@ const RAW: Omit<Question, "id">[] = [
 
 export const QUESTIONS: Question[] = RAW.map((q, i) => ({ ...q, id: `q${i + 1}` }));
 
+/** Canonical category list, derived from the bank so the two can never drift.
+ * Drives the category-specific leaderboards. */
+export const CATEGORIES: string[] = [...new Set(RAW.map((q) => q.category))].sort();
+
 /**
  * Picks `count` unique questions, ordered so difficulty ramps up across the
  * match — early rounds stay approachable, late rounds get brutal.

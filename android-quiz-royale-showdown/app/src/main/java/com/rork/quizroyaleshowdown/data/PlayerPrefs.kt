@@ -5,16 +5,20 @@ import android.content.SharedPreferences
 import java.util.UUID
 
 /**
- * Tiny local identity store. Only the two things worth keeping between
- * sessions live here: a stable player id (so reconnects rejoin the same seat)
- * and the display name.
+ * Local identity store.
+ *
+ * Holds the display name, a stable device id, the temporary guest id and — for
+ * registered players — the opaque session token. The password is NEVER stored,
+ * cached or written to disk in any form: it is sent once over TLS and the server
+ * keeps only a salted PBKDF2 derivation of it.
  */
 class PlayerPrefs(context: Context) {
 
     private val prefs: SharedPreferences =
         context.applicationContext.getSharedPreferences("quiz_royale", Context.MODE_PRIVATE)
 
-    val playerId: String
+    /** Stable per-install id. Used only for matchmaking bucketing. */
+    val deviceId: String
         get() {
             prefs.getString(KEY_ID, null)?.let { return it }
             val fresh = UUID.randomUUID().toString()
@@ -28,7 +32,25 @@ class PlayerPrefs(context: Context) {
             prefs.edit().putString(KEY_NAME, value.trim().take(16)).apply()
         }
 
-    /** Best run so far, used for the home-screen personal record. */
+    /** Opaque bearer token for a registered session. Null when playing as guest. */
+    var sessionToken: String?
+        get() = prefs.getString(KEY_TOKEN, null)?.takeIf { it.isNotBlank() }
+        set(value) {
+            prefs.edit().apply {
+                if (value.isNullOrBlank()) remove(KEY_TOKEN) else putString(KEY_TOKEN, value)
+            }.apply()
+        }
+
+    /** The current temporary guest id, if one has been issued. */
+    var guestId: String?
+        get() = prefs.getString(KEY_GUEST_ID, null)?.takeIf { it.isNotBlank() }
+        set(value) {
+            prefs.edit().apply {
+                if (value.isNullOrBlank()) remove(KEY_GUEST_ID) else putString(KEY_GUEST_ID, value)
+            }.apply()
+        }
+
+    /** Offline fallback record, shown before the server stats land. */
     var bestPlacement: Int
         get() = prefs.getInt(KEY_BEST_PLACE, 0)
         set(value) = prefs.edit().putInt(KEY_BEST_PLACE, value).apply()
@@ -46,6 +68,8 @@ class PlayerPrefs(context: Context) {
     private companion object {
         const val KEY_ID = "player_id"
         const val KEY_NAME = "player_name"
+        const val KEY_TOKEN = "session_token"
+        const val KEY_GUEST_ID = "guest_id"
         const val KEY_BEST_PLACE = "best_placement"
         const val KEY_BEST_SCORE = "best_score"
         const val KEY_WINS = "wins"
