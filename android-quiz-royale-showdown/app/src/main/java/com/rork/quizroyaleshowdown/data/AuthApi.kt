@@ -77,6 +77,27 @@ class AuthApi {
         }
     }
 
+    suspend fun requestPasswordReset(identifier: String): AuthOutcome<PasswordResetRequestResult> =
+        runOutcomeCall {
+            http.post("$base/auth/forgot-password") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject { put("identifier", JsonPrimitive(identifier)) })
+            }
+        }
+
+    suspend fun resetPassword(token: String, password: String): AuthOutcome<AuthResult> =
+        runAuthCall {
+            http.post("$base/auth/reset-password") {
+                contentType(ContentType.Application.Json)
+                setBody(
+                    buildJsonObject {
+                        put("token", JsonPrimitive(token))
+                        put("password", JsonPrimitive(password))
+                    }
+                )
+            }
+        }
+
     suspend fun logout(token: String) {
         runCatching {
             http.post("$base/auth/logout") { header("Authorization", "Bearer $token") }
@@ -230,10 +251,15 @@ class AuthApi {
     // ------------------------------------------------------------------ shared
 
     private suspend fun runAuthCall(block: suspend () -> HttpResponse): AuthOutcome<AuthResult> =
+        runOutcomeCall(block)
+
+    private suspend inline fun <reified T> runOutcomeCall(
+        noinline block: suspend () -> HttpResponse
+    ): AuthOutcome<T> =
         try {
             val response = block()
             if (response.status.isSuccess()) {
-                AuthOutcome.Ok(response.body<AuthResult>())
+                AuthOutcome.Ok(response.body<T>())
             } else {
                 decodeError(response)
             }

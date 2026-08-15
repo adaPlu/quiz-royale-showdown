@@ -16,6 +16,7 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   hashPassword,
+  mintPasswordResetToken,
   mintSessionToken,
   sha256Hex,
   validateEmail,
@@ -51,6 +52,8 @@ type UserRecord = {
   lastLoginAt: number;
   stats: PlayerStats;
   friends: { userId: string; addedAt: number }[];
+  passwordResetDigest?: string;
+  passwordResetExpiresAt?: number;
 };
 
 type SessionRecord = {
@@ -59,7 +62,14 @@ type SessionRecord = {
   createdAt: number;
 };
 
+type PasswordResetRecord = {
+  userId: string;
+  expiresAt: number;
+  createdAt: number;
+};
+
 const MAX_FRIENDS = 200;
+const PASSWORD_RESET_TTL_MS = 30 * 60 * 1000;
 
 /** Presence lives under its own key so a check-in never rewrites the account. */
 function presenceKey(userId: string): string {
@@ -79,6 +89,10 @@ export class UserDirectory extends DurableObject<DoEnv> {
           return await this.login(request);
         case "POST /auth/logout":
           return await this.logout(request);
+        case "POST /auth/forgot-password":
+          return await this.forgotPassword(request);
+        case "POST /auth/reset-password":
+          return await this.resetPassword(request);
         case "GET /auth/me":
           return await this.me(request);
         case "GET /auth/resolve":
@@ -251,6 +265,89 @@ export class UserDirectory extends DurableObject<DoEnv> {
     const token = bearer(request);
     if (token) await this.ctx.storage.delete(`sess:${await sha256Hex(token)}`);
     return json({ ok: true });
+  }
+
+  // ------------------------------------------------------------ reset password
+
+  private async forgotPassword(request: Request): Promise<Response> {
+    const body = await safeJson(request);
+    const identifier = typeof body.identifier === "string" ? body.identifier.trim() : "";
+
+    if (!identifier) {
+      return json({ error: "validation_failed", fields: { identifier: "Enter your username or email." } }, 400);
+    }
+
+    const key = identifier.includes("@")
+      ? `email:${identifier.toLowerCase()}`
+      : `uname:${identifier.toLowerCase()}`;
+    const userId = await this.ctx.storage.get<string>(key);
+    const record = userId ? await this.ctx.storage.get<UserRecord>(`user:${userId}`) : null;
+
+    // Enumeration-resistant: unknown accounts get the same success body.
+    if (!record) return json({ ok: true });
+
+    if (record.passwordResetDigest) {
+      await this.ctx.storage.delete(`reset:${record.passwordResetDigest}`);
+    }
+
+    const { token, digest } = await mintPasswordResetToken();
+    const now = Date.now();
+    record.passwordResetDigest = digest;
+    record.passwordResetExpiresAt = now + PASSWORD_RESET_TTL_MS;
+
+    await this.ctx.storage.put({
+      [`user:${record.userId}`]: record,
+      [`reset:${digest}`]: {
+        userId: record.userId,
+        expiresAt: record.passwordResetExpiresAt,
+        createdAt: now,
+      } satisfies PasswordResetRecord,
+    });
+
+    await this.sendPasswordResetEmail(record, token).catch((error) => {
+      console.error("Password reset email failed", record.userId, (error as Error)?.message);
+    });
+
+    return json({ ok: true });
+  }
+
+  private async resetPassword(request: Request): Promise<Response> {
+    const body = await safeJson(request);
+    const token = typeof body.token === "string" ? body.token.trim() : "";
+    const digest = token ? await sha256Hex(token) : "";
+    const ticket = digest ? await this.ctx.storage.get<PasswordResetRecord>(`reset:${digest}`) : null;
+
+    if (!ticket || ticket.expiresAt <= Date.now()) {
+      if (digest) await this.ctx.storage.delete(`reset:${digest}`);
+      return json({ error: "validation_failed", fields: { token: "That reset code is invalid or expired." } }, 400);
+    }
+
+    const record = await this.ctx.storage.get<UserRecord>(`user:${ticket.userId}`);
+    if (!record || record.passwordResetDigest !== digest) {
+      await this.ctx.storage.delete(`reset:${digest}`);
+      return json({ error: "validation_failed", fields: { token: "That reset code is invalid or expired." } }, 400);
+    }
+
+    const password = validatePassword(body.password, record.username);
+    if (password.error) {
+      return json({ error: "validation_failed", fields: { password: password.error } }, 400);
+    }
+
+    record.passwordHash = await hashPassword(password.value);
+    delete record.passwordResetDigest;
+    delete record.passwordResetExpiresAt;
+
+    await this.revokeUserSessions(record.userId);
+    await this.ctx.storage.put(`user:${record.userId}`, record);
+    await this.ctx.storage.delete(`reset:${digest}`);
+
+    const session = await this.createSession(record.userId);
+    return json({
+      token: session.token,
+      expiresAt: session.expiresAt,
+      profile: await this.toProfile(record),
+      transferredFromGuest: false,
+    } satisfies AuthResultDto);
   }
 
   private async me(request: Request): Promise<Response> {
@@ -477,6 +574,61 @@ export class UserDirectory extends DurableObject<DoEnv> {
     return { token, expiresAt };
   }
 
+  private async revokeUserSessions(userId: string): Promise<void> {
+    const sessions = await this.ctx.storage.list<SessionRecord>({ prefix: "sess:", limit: 1_000 });
+    const deletes: string[] = [];
+    for (const [key, session] of sessions) {
+      if (session.userId === userId) deletes.push(key);
+    }
+    if (deletes.length > 0) await this.ctx.storage.delete(deletes);
+  }
+
+  private async sendPasswordResetEmail(record: UserRecord, token: string): Promise<void> {
+    const link = resetLink(this.env.PASSWORD_RESET_BASE_URL, token);
+    const text = [
+      `Hi ${record.username},`,
+      "",
+      "Use this one-time reset code to create a new Quiz Royale password:",
+      token,
+      "",
+      `Reset link: ${link}`,
+      "",
+      "This code expires in 30 minutes. If you did not request it, you can ignore this email.",
+    ].join("\n");
+
+    const endpoint = this.env.PASSWORD_RESET_EMAIL_ENDPOINT;
+    if (!endpoint) {
+      console.info("Password reset email not configured; reset link:", link);
+      return;
+    }
+
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.env.PASSWORD_RESET_EMAIL_TOKEN) {
+      headers.Authorization = `Bearer ${this.env.PASSWORD_RESET_EMAIL_TOKEN}`;
+    }
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        to: record.email,
+        from: this.env.PASSWORD_RESET_FROM ?? "no-reply@quizroyale.example",
+        subject: "Reset your Quiz Royale password",
+        text,
+        html:
+          `<p>Hi ${escapeHtml(record.username)},</p>` +
+          "<p>Use this one-time reset code to create a new Quiz Royale password:</p>" +
+          `<p><strong>${escapeHtml(token)}</strong></p>` +
+          `<p><a href="${escapeHtml(link)}">Reset your password</a></p>` +
+          "<p>This code expires in 30 minutes. If you did not request it, you can ignore this email.</p>",
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`email provider returned ${response.status}`);
+    }
+  }
+
   /** Resolves friend edges into rows carrying stats and live presence. */
   private async hydrateFriends(record: UserRecord): Promise<FriendDto[]> {
     const now = Date.now();
@@ -566,4 +718,19 @@ async function safeJson(request: Request): Promise<Record<string, unknown>> {
 
 function json(body: unknown, status = 200): Response {
   return Response.json(body, { status });
+}
+
+function resetLink(base: string | undefined, token: string): string {
+  const root = (base?.trim() || "quizroyale://reset-password").replace(/[?&]token=$/, "");
+  const separator = root.includes("?") ? "&" : "?";
+  return `${root}${separator}token=${encodeURIComponent(token)}`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }

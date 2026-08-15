@@ -3,7 +3,13 @@
 
 export type DoFetcher = Fetcher;
 
-export type DoEnv = { DO: DoFetcher };
+export type DoEnv = {
+  DO: DoFetcher;
+  PASSWORD_RESET_BASE_URL?: string;
+  PASSWORD_RESET_EMAIL_ENDPOINT?: string;
+  PASSWORD_RESET_EMAIL_TOKEN?: string;
+  PASSWORD_RESET_FROM?: string;
+};
 
 /** Singleton instance names for the stores that have exactly one shard. */
 export const USER_DIRECTORY_ID = "main";

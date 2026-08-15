@@ -427,6 +427,55 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun requestPasswordReset(identifier: String) {
+        if (_uiState.value.busy) return
+        _uiState.update { it.copy(busy = true, fieldErrors = emptyMap(), error = null, notice = null) }
+
+        viewModelScope.launch {
+            when (val outcome = api.requestPasswordReset(identifier)) {
+                is AuthOutcome.Ok -> _uiState.update {
+                    it.copy(
+                        busy = false,
+                        notice = "If that account exists, a password reset email is on the way."
+                    )
+                }
+
+                is AuthOutcome.Invalid -> _uiState.update {
+                    it.copy(busy = false, fieldErrors = outcome.fields, error = outcome.message)
+                }
+
+                is AuthOutcome.Failed -> _uiState.update {
+                    it.copy(busy = false, error = outcome.message)
+                }
+            }
+        }
+    }
+
+    fun resetPassword(token: String, password: String, onSuccess: () -> Unit) {
+        if (_uiState.value.busy) return
+        _uiState.update { it.copy(busy = true, fieldErrors = emptyMap(), error = null, notice = null) }
+
+        viewModelScope.launch {
+            when (val outcome = api.resetPassword(token, password)) {
+                is AuthOutcome.Ok -> {
+                    adoptSession(outcome.value)
+                    _uiState.update {
+                        it.copy(busy = false, notice = "Password reset. You're signed in.")
+                    }
+                    onSuccess()
+                }
+
+                is AuthOutcome.Invalid -> _uiState.update {
+                    it.copy(busy = false, fieldErrors = outcome.fields, error = outcome.message)
+                }
+
+                is AuthOutcome.Failed -> _uiState.update {
+                    it.copy(busy = false, error = outcome.message)
+                }
+            }
+        }
+    }
+
     /** Stores the token, adopts the profile and stops any guest keep-alive. */
     private fun adoptSession(result: AuthResult) {
         heartbeatJob?.cancel()

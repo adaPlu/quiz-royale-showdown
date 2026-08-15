@@ -2,6 +2,9 @@ package com.rork.quizroyaleshowdown.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 import java.util.UUID
 
 /**
@@ -14,8 +17,14 @@ import java.util.UUID
  */
 class PlayerPrefs(context: Context) {
 
+    private val appContext = context.applicationContext
     private val prefs: SharedPreferences =
-        context.applicationContext.getSharedPreferences("quiz_royale", Context.MODE_PRIVATE)
+        appContext.getSharedPreferences("quiz_royale", Context.MODE_PRIVATE)
+    private val securePrefs: SharedPreferences? = createSecurePrefs(appContext)
+
+    init {
+        migratePlaintextSessionToken()
+    }
 
     /** Stable per-install id. Used only for matchmaking bucketing. */
     val deviceId: String
@@ -34,11 +43,12 @@ class PlayerPrefs(context: Context) {
 
     /** Opaque bearer token for a registered session. Null when playing as guest. */
     var sessionToken: String?
-        get() = prefs.getString(KEY_TOKEN, null)?.takeIf { it.isNotBlank() }
+        get() = securePrefs?.getString(KEY_TOKEN, null)?.takeIf { it.isNotBlank() }
         set(value) {
-            prefs.edit().apply {
+            securePrefs?.edit()?.apply {
                 if (value.isNullOrBlank()) remove(KEY_TOKEN) else putString(KEY_TOKEN, value)
-            }.apply()
+            }?.apply()
+            prefs.edit().remove(KEY_TOKEN).apply()
         }
 
     /** The current temporary guest id, if one has been issued. */
@@ -65,7 +75,40 @@ class PlayerPrefs(context: Context) {
 
     private fun defaultName(): String = "Player${(1000..9999).random()}"
 
+    private fun migratePlaintextSessionToken() {
+        val oldToken = prefs.getString(KEY_TOKEN, null)?.takeIf { it.isNotBlank() }
+        if (oldToken == null) {
+            prefs.edit().remove(KEY_TOKEN).apply()
+            return
+        }
+
+        if (securePrefs != null) {
+            securePrefs.edit().putString(KEY_TOKEN, oldToken).apply()
+        } else {
+            Log.w(TAG, "Encrypted token storage unavailable; dropping plaintext session token")
+        }
+        prefs.edit().remove(KEY_TOKEN).apply()
+    }
+
+    private fun createSecurePrefs(context: Context): SharedPreferences? = runCatching {
+        val masterKey = MasterKey.Builder(context)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+
+        EncryptedSharedPreferences.create(
+            context,
+            SECURE_PREFS_NAME,
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+    }.onFailure {
+        Log.w(TAG, "EncryptedSharedPreferences unavailable: ${it.message}")
+    }.getOrNull()
+
     private companion object {
+        const val TAG = "PlayerPrefs"
+        const val SECURE_PREFS_NAME = "quiz_royale_secure"
         const val KEY_ID = "player_id"
         const val KEY_NAME = "player_name"
         const val KEY_TOKEN = "session_token"

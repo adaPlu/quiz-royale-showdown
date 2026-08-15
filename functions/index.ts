@@ -58,7 +58,7 @@ const CORS: Record<string, string> = {
 
 /** Path -> DO class routing table for the plain-HTTP endpoints. */
 const HTTP_ROUTES: { pattern: RegExp; className: string; instance: string; methods: string[] }[] = [
-  { pattern: /^\/auth\/(register|login|logout)$/, className: "UserDirectory", instance: USER_DIRECTORY_ID, methods: ["POST"] },
+  { pattern: /^\/auth\/(register|login|logout|forgot-password|reset-password)$/, className: "UserDirectory", instance: USER_DIRECTORY_ID, methods: ["POST"] },
   { pattern: /^\/auth\/me$/, className: "UserDirectory", instance: USER_DIRECTORY_ID, methods: ["GET"] },
   { pattern: /^\/users\/search$/, className: "UserDirectory", instance: USER_DIRECTORY_ID, methods: ["GET"] },
   { pattern: /^\/friends\/(add|remove)$/, className: "UserDirectory", instance: USER_DIRECTORY_ID, methods: ["POST"] },

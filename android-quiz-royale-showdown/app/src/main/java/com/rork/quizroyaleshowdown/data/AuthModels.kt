@@ -91,6 +91,9 @@ data class AuthResult(
 )
 
 @Serializable
+data class PasswordResetRequestResult(val ok: Boolean = false)
+
+@Serializable
 data class FriendMutationResult(val ok: Boolean = false, val profile: UserProfile? = null)
 
 @Serializable
