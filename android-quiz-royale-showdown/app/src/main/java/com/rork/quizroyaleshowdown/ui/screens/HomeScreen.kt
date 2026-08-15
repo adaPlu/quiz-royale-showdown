@@ -60,12 +60,17 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.rork.quizroyaleshowdown.data.AuthViewModel
 import com.rork.quizroyaleshowdown.data.GameMode
+import com.rork.quizroyaleshowdown.data.GuestExpiryState
 import com.rork.quizroyaleshowdown.data.Identity
 import com.rork.quizroyaleshowdown.data.MODE_INFO
 import com.rork.quizroyaleshowdown.data.ModeInfo
 import com.rork.quizroyaleshowdown.data.PlayerStats
+import com.rork.quizroyaleshowdown.data.badgeShelf
 import com.rork.quizroyaleshowdown.ui.components.ArenaBackground
 import com.rork.quizroyaleshowdown.ui.components.ArenaButton
+import com.rork.quizroyaleshowdown.ui.components.BadgeShelf
+import com.rork.quizroyaleshowdown.ui.components.GuestExpiryWarning
+import com.rork.quizroyaleshowdown.ui.components.GuestSessionChip
 import com.rork.quizroyaleshowdown.ui.components.PressableSurface
 import com.rork.quizroyaleshowdown.ui.components.StatBlock
 import com.rork.quizroyaleshowdown.ui.components.TagChip
@@ -81,6 +86,7 @@ fun HomeScreen(
     onProfile: () -> Unit
 ) {
     val authState by authViewModel.uiState.collectAsStateWithLifecycle()
+    val expiry by authViewModel.guestExpiry.collectAsStateWithLifecycle()
     val identity = authState.identity
     val stats = identity.stats ?: PlayerStats()
     val haptics = LocalHapticFeedback.current
@@ -154,8 +160,23 @@ fun HomeScreen(
                         }
                     }
                 },
-                onOpenProfile = onProfile
+                onOpenProfile = onProfile,
+                expiry = expiry,
+                stats = stats
             )
+
+            // Escalating idle warning, directly under the identity it concerns.
+            if (identity is Identity.Guest) {
+                Spacer(Modifier.height(12.dp))
+                GuestExpiryWarning(
+                    expiry = expiry,
+                    onExtend = { authViewModel.extendGuestSession() },
+                    onRegister = {
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onRegister()
+                    }
+                )
+            }
 
             // The primary conversion moment: a guest is one tap from a permanent
             // account, and told exactly what they gain.
@@ -423,7 +444,9 @@ private fun AccountCard(
     editing: Boolean,
     onNameChange: (String) -> Unit,
     onToggleEdit: () -> Unit,
-    onOpenProfile: () -> Unit
+    onOpenProfile: () -> Unit,
+    expiry: GuestExpiryState?,
+    stats: PlayerStats
 ) {
     val registered = identity.isRegistered
     val accent = if (registered) Arena.Gold else Arena.Cyan
@@ -493,6 +516,17 @@ private fun AccountCard(
                         style = MaterialTheme.typography.bodySmall,
                         color = Arena.TextLow
                     )
+                } else if (expiry != null) {
+                    // The quiet, always-visible half of the expiry story.
+                    Spacer(Modifier.height(6.dp))
+                    GuestSessionChip(expiry = expiry)
+                }
+
+                // Earned badges read as a trophy row right under the name.
+                val shelf = remember(stats) { badgeShelf(stats) }
+                if (shelf.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    BadgeShelf(stats = stats, medalSize = 30.dp)
                 }
             }
 

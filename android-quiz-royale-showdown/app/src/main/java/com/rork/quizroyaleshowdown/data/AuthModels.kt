@@ -20,7 +20,12 @@ data class PlayerStats(
     val correctAnswers: Int = 0,
     val powerUpsUsed: Int = 0,
     val powerUpCharges: Int = 0,
-    val categoryPoints: Map<String, Int> = emptyMap()
+    val categoryPoints: Map<String, Int> = emptyMap(),
+    /**
+     * Best world leaderboard rank ever held, captured server-side at the moment
+     * it was reached — so a milestone badge stays earned after being overtaken.
+     */
+    val bestRank: Int? = null
 )
 
 /** A temporary identity. Note the absence of email/password/friends. */
@@ -33,14 +38,32 @@ data class GuestSession(
     val stats: PlayerStats = PlayerStats()
 )
 
+/** What a friend is doing right now, as reported by the server. */
+enum class PresenceStatus { OFFLINE, ONLINE, IN_MATCH }
+
 @Serializable
 data class Friend(
     val userId: String,
     val username: String,
     val totalPoints: Int = 0,
     val wins: Int = 0,
-    val addedAt: Long = 0L
-)
+    val addedAt: Long = 0L,
+    /** Raw wire value; read [status] instead so an unknown value is safe. */
+    val presence: String = "OFFLINE",
+    /** Mode name while in a match, null otherwise. */
+    val matchMode: String? = null,
+    val lastSeenAt: Long = 0L
+) {
+    val status: PresenceStatus
+        get() = when (presence) {
+            "IN_MATCH" -> PresenceStatus.IN_MATCH
+            "ONLINE" -> PresenceStatus.ONLINE
+            else -> PresenceStatus.OFFLINE
+        }
+}
+
+@Serializable
+data class FriendsEnvelope(val friends: List<Friend> = emptyList())
 
 /** A durable identity: credentials, a friends graph and persistent stats. */
 @Serializable

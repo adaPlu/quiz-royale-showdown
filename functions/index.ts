@@ -11,6 +11,8 @@
 //   GET  /auth/me                             the caller's profile + friends
 //   GET  /users/search?q=                     find players to befriend
 //   POST /friends/add | /friends/remove       mutate the friends graph
+//   GET  /friends                             friends + live presence (polled)
+//   POST /presence/ping                       "I am still here" check-in
 //
 //   POST /guest/session                       issue or renew a temporary guest id
 //   POST /guest/heartbeat                     keep a guest id alive
@@ -19,6 +21,9 @@
 //
 //   GET  /leaderboard?board=WORLD|<category>  ranked board (guests + users)
 //   GET  /leaderboard/boards                  the list of available boards
+//
+// Presence is deliberately friends-only: /friends is the sole way to read it,
+// and it requires a session token, so a player's activity is never public.
 //
 // Identity is resolved HERE, at the edge, before the match socket reaches the
 // room. The room then trusts the `kind` / `playerId` query params because this
@@ -57,6 +62,8 @@ const HTTP_ROUTES: { pattern: RegExp; className: string; instance: string; metho
   { pattern: /^\/auth\/me$/, className: "UserDirectory", instance: USER_DIRECTORY_ID, methods: ["GET"] },
   { pattern: /^\/users\/search$/, className: "UserDirectory", instance: USER_DIRECTORY_ID, methods: ["GET"] },
   { pattern: /^\/friends\/(add|remove)$/, className: "UserDirectory", instance: USER_DIRECTORY_ID, methods: ["POST"] },
+  { pattern: /^\/friends$/, className: "UserDirectory", instance: USER_DIRECTORY_ID, methods: ["GET"] },
+  { pattern: /^\/presence\/ping$/, className: "UserDirectory", instance: USER_DIRECTORY_ID, methods: ["POST"] },
   { pattern: /^\/guest\/(session|heartbeat|end)$/, className: "GuestRegistry", instance: GUEST_REGISTRY_ID, methods: ["POST"] },
   { pattern: /^\/guest\/me$/, className: "GuestRegistry", instance: GUEST_REGISTRY_ID, methods: ["GET"] },
   { pattern: /^\/leaderboard$/, className: "Leaderboard", instance: LEADERBOARD_ID, methods: ["GET"] },

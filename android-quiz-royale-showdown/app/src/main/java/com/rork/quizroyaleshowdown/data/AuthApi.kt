@@ -161,6 +161,42 @@ class AuthApi {
             }
         }
 
+    /**
+     * Reads the friends list with live presence. Cheaper than a full profile
+     * fetch, so the friends list can poll it while it is on screen.
+     */
+    suspend fun friends(token: String): List<Friend>? = runCatching {
+        val response = http.get("$base/friends") { header("Authorization", "Bearer $token") }
+        if (!response.status.isSuccess()) return null
+        response.body<FriendsEnvelope>().friends
+    }.getOrElse {
+        Log.w(TAG, "Friends fetch failed: ${it.message}")
+        null
+    }
+
+    /**
+     * Reports that the player is still active, optionally in a match, and gets
+     * the friends list back in the same round trip. Returns null on failure so
+     * the caller can keep the last known presence rather than blanking it.
+     */
+    suspend fun presencePing(token: String, matchMode: String?): List<Friend>? = runCatching {
+        val response = http.post("$base/presence/ping") {
+            header("Authorization", "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody(
+                buildJsonObject {
+                    put("status", JsonPrimitive(if (matchMode != null) "IN_MATCH" else "IDLE"))
+                    if (matchMode != null) put("matchMode", JsonPrimitive(matchMode))
+                }
+            )
+        }
+        if (!response.status.isSuccess()) return null
+        response.body<FriendsEnvelope>().friends
+    }.getOrElse {
+        Log.w(TAG, "Presence ping failed: ${it.message}")
+        null
+    }
+
     suspend fun searchUsers(query: String): List<UserSearchResult> = runCatching {
         val response = http.get("$base/users/search") { parameter("q", query) }
         if (!response.status.isSuccess()) return emptyList()

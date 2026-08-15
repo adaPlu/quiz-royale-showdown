@@ -27,6 +27,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,13 +44,20 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.rork.quizroyaleshowdown.data.AuthViewModel
 import com.rork.quizroyaleshowdown.data.Friend
+import com.rork.quizroyaleshowdown.data.GuestExpiryState
 import com.rork.quizroyaleshowdown.data.Identity
 import com.rork.quizroyaleshowdown.data.PlayerStats
+import com.rork.quizroyaleshowdown.data.PresenceStatus
 import com.rork.quizroyaleshowdown.ui.components.ArenaBackground
 import com.rork.quizroyaleshowdown.ui.components.ArenaBanner
 import com.rork.quizroyaleshowdown.ui.components.ArenaButton
 import com.rork.quizroyaleshowdown.ui.components.ArenaOutlineButton
 import com.rork.quizroyaleshowdown.ui.components.ArenaTextField
+import com.rork.quizroyaleshowdown.ui.components.BadgeCollection
+import com.rork.quizroyaleshowdown.ui.components.GuestExpiryWarning
+import com.rork.quizroyaleshowdown.ui.components.GuestSessionChip
+import com.rork.quizroyaleshowdown.ui.components.PresenceDot
+import com.rork.quizroyaleshowdown.ui.components.PresenceRow
 import com.rork.quizroyaleshowdown.ui.components.PressableSurface
 import com.rork.quizroyaleshowdown.ui.components.StatBlock
 import com.rork.quizroyaleshowdown.ui.components.TagChip
@@ -67,11 +75,18 @@ fun ProfileScreen(
     onRegister: () -> Unit
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val expiry by viewModel.guestExpiry.collectAsStateWithLifecycle()
     val identity = state.identity
     val stats = identity.stats ?: PlayerStats()
     var friendName by remember { mutableStateOf("") }
 
     val accent = if (identity.isRegistered) Arena.Gold else Arena.Cyan
+
+    // Pull fresh presence the moment the list is on screen rather than waiting
+    // for the next background ping.
+    LaunchedEffect(identity.isRegistered) {
+        if (identity.isRegistered) viewModel.refreshFriends()
+    }
 
     ArenaBackground(accent = accent) {
         Column(
@@ -114,7 +129,16 @@ fun ProfileScreen(
 
             Spacer(Modifier.height(20.dp))
 
-            IdentityCard(identity = identity, accent = accent)
+            IdentityCard(identity = identity, accent = accent, expiry = expiry)
+
+            if (identity is Identity.Guest) {
+                Spacer(Modifier.height(14.dp))
+                GuestExpiryWarning(
+                    expiry = expiry,
+                    onExtend = { viewModel.extendGuestSession() },
+                    onRegister = onRegister
+                )
+            }
 
             if (state.notice != null) {
                 Spacer(Modifier.height(14.dp))
@@ -182,8 +206,17 @@ fun ProfileScreen(
             Spacer(Modifier.height(10.dp))
             PowerUpCard(charges = stats.powerUpCharges, used = stats.powerUpsUsed)
 
+            Spacer(Modifier.height(22.dp))
+
+            SectionHeader(
+                title = "Badges",
+                trailing = stats.bestRank?.let { "best rank #$it" }
+            )
+            Spacer(Modifier.height(12.dp))
+            BadgeCollection(stats = stats)
+
             if (stats.categoryPoints.isNotEmpty()) {
-                Spacer(Modifier.height(20.dp))
+                Spacer(Modifier.height(22.dp))
                 SectionHeader("Category mastery")
                 Spacer(Modifier.height(10.dp))
                 CategoryBreakdown(stats.categoryPoints)
@@ -193,7 +226,16 @@ fun ProfileScreen(
 
             when (identity) {
                 is Identity.Registered -> {
-                    SectionHeader("Friends", trailing = "${identity.profile.friends.size}")
+                    val friends = state.friends
+                    val activeCount = friends.count { it.status != PresenceStatus.OFFLINE }
+                    SectionHeader(
+                        title = "Friends",
+                        trailing = if (friends.isEmpty()) {
+                            "0"
+                        } else {
+                            "$activeCount of ${friends.size} active"
+                        }
+                    )
                     Spacer(Modifier.height(10.dp))
 
                     ArenaTextField(
@@ -218,7 +260,7 @@ fun ProfileScreen(
 
                     Spacer(Modifier.height(14.dp))
 
-                    if (identity.profile.friends.isEmpty()) {
+                    if (friends.isEmpty()) {
                         Text(
                             text = "No friends yet. Add someone by username to compare records.",
                             style = MaterialTheme.typography.bodySmall,
@@ -226,7 +268,7 @@ fun ProfileScreen(
                         )
                     } else {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            identity.profile.friends.forEach { friend ->
+                            friends.forEach { friend ->
                                 FriendRow(
                                     friend = friend,
                                     busy = state.busy,
@@ -259,7 +301,7 @@ fun ProfileScreen(
 }
 
 @Composable
-private fun IdentityCard(identity: Identity, accent: Color) {
+private fun IdentityCard(identity: Identity, accent: Color, expiry: GuestExpiryState?) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -304,7 +346,7 @@ private fun IdentityCard(identity: Identity, accent: Color) {
             is Identity.Guest -> {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Filled.HourglassEmpty,
@@ -317,6 +359,9 @@ private fun IdentityCard(identity: Identity, accent: Color) {
                         style = MaterialTheme.typography.bodySmall,
                         color = Arena.Cyan
                     )
+                    if (expiry != null) {
+                        GuestSessionChip(expiry = expiry)
+                    }
                 }
                 Spacer(Modifier.height(4.dp))
                 Text(
@@ -478,18 +523,33 @@ private fun FriendRow(friend: Friend, busy: Boolean, onRemove: () -> Unit) {
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(
-            modifier = Modifier
-                .size(34.dp)
-                .clip(RoundedCornerShape(50))
-                .background(Arena.Violet.copy(alpha = 0.22f)),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = friend.username.take(1).uppercase(),
-                style = MaterialTheme.typography.titleMedium,
-                color = Arena.Violet
-            )
+        // Avatar carries the presence dot as a corner badge, the pattern people
+        // already read as "online" from every chat app.
+        Box(modifier = Modifier.size(38.dp)) {
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .align(Alignment.TopStart)
+                    .clip(RoundedCornerShape(50))
+                    .background(Arena.Violet.copy(alpha = 0.22f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = friend.username.take(1).uppercase(),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Arena.Violet
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .size(13.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(Arena.Surface),
+                contentAlignment = Alignment.Center
+            ) {
+                PresenceDot(status = friend.status, size = 9.dp)
+            }
         }
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
@@ -499,6 +559,13 @@ private fun FriendRow(friend: Friend, busy: Boolean, onRemove: () -> Unit) {
                 color = Arena.TextHi,
                 fontWeight = FontWeight.W700
             )
+            Spacer(Modifier.height(2.dp))
+            PresenceRow(
+                status = friend.status,
+                matchMode = friend.matchMode,
+                lastSeenAt = friend.lastSeenAt
+            )
+            Spacer(Modifier.height(3.dp))
             Text(
                 text = "${friend.totalPoints} pts · ${friend.wins} crowns",
                 style = MaterialTheme.typography.bodySmall,

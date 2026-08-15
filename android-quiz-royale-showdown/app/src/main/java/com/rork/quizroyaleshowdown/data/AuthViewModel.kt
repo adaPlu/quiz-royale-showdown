@@ -15,11 +15,46 @@ import kotlinx.coroutines.launch
 
 private const val TAG = "AuthViewModel"
 
-/** How often an active guest checks in so its temporary id does not lapse. */
-private const val HEARTBEAT_INTERVAL_MS = 4L * 60L * 1000L
+/** Mirrors the server's guest TTL so the countdown bar can show a full scale. */
+const val GUEST_TTL_MS = 30L * 60L * 1000L
+
+/** How often the keep-alive loop wakes to consider checking in. */
+private const val HEARTBEAT_TICK_MS = 30L * 1000L
+
+/**
+ * A check-in only happens if the player did something since the last one. This
+ * is what makes the 30-minute limit a real *idle* timeout: an app left open on
+ * the table stops extending the session, so the warning can actually appear.
+ */
+private const val ACTIVITY_WINDOW_MS = 90L * 1000L
+
+/** How often a registered player reports presence to their friends. */
+private const val PRESENCE_TICK_MS = 45L * 1000L
+
+/** Remaining time at which the guest warning appears, and turns urgent. */
+private const val EXPIRY_WARNING_MS = 5L * 60L * 1000L
+private const val EXPIRY_CRITICAL_MS = 60L * 1000L
 
 /** Credentials handed to the match socket. Exactly one is ever populated. */
 data class MatchCredentials(val token: String?, val guestId: String?)
+
+/** How close a guest session is to lapsing. */
+enum class ExpiryLevel { SAFE, WARNING, CRITICAL, LAPSED }
+
+data class GuestExpiryState(
+    val expiresAt: Long,
+    val remainingMs: Long,
+    val level: ExpiryLevel
+) {
+    /** 1f at a full window, 0f at expiry — drives the drain bar. */
+    val fraction: Float get() = (remainingMs.toFloat() / GUEST_TTL_MS).coerceIn(0f, 1f)
+
+    val mmss: String
+        get() {
+            val totalSeconds = (remainingMs / 1000L).coerceAtLeast(0L)
+            return "%d:%02d".format(totalSeconds / 60L, totalSeconds % 60L)
+        }
+}
 
 data class AuthUiState(
     val identity: Identity = Identity.Unknown,
@@ -29,14 +64,16 @@ data class AuthUiState(
     val error: String? = null,
     val notice: String? = null,
     /** True once we know who the player is, so the UI can stop showing a spinner. */
-    val bootstrapped: Boolean = false
+    val bootstrapped: Boolean = false,
+    /** Friends with live presence. Kept beside the profile so pings can refresh it. */
+    val friends: List<Friend> = emptyList()
 )
 
 /**
  * Owns the player's identity for the whole app: bootstraps a guest session on
  * first run, exchanges credentials for a session token on register/login, keeps
- * the guest id alive while the app is in use, and exposes the stats the home
- * screen and leaderboards render.
+ * the guest id alive *while the player is actually active*, publishes how long a
+ * guest session has left, and reports presence so friends can see each other.
  */
 class AuthViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -46,7 +83,20 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
     private val _uiState = MutableStateFlow(AuthUiState())
     val uiState: StateFlow<AuthUiState> = _uiState.asStateFlow()
 
+    /** Null unless the player is a guest. Ticks about once a second. */
+    private val _guestExpiry = MutableStateFlow<GuestExpiryState?>(null)
+    val guestExpiry: StateFlow<GuestExpiryState?> = _guestExpiry.asStateFlow()
+
     private var heartbeatJob: Job? = null
+    private var presenceJob: Job? = null
+    private var tickerJob: Job? = null
+
+    private var foreground = false
+    private var lastActivityAt = System.currentTimeMillis()
+    /** Guards against re-issuing a guest id repeatedly once one has lapsed. */
+    private var handlingLapse = false
+    /** Set while a match is on screen, so presence reads IN_MATCH. */
+    private var inMatchMode: String? = null
 
     val identity: Identity get() = _uiState.value.identity
 
@@ -65,6 +115,55 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         bootstrap()
     }
 
+    // ---------------------------------------------------------------- lifecycle
+
+    /**
+     * Called when the app comes to the foreground. Loops only run while the app
+     * is actually visible — a backgrounded app must not hold a guest id alive,
+     * nor keep telling friends it is online.
+     */
+    fun onForeground() {
+        if (foreground) return
+        foreground = true
+        noteActivity()
+        startTicker()
+        startHeartbeat()
+        startPresence()
+        // The session may have lapsed while we were away, so re-read it.
+        if (_uiState.value.bootstrapped) refresh()
+    }
+
+    fun onBackground() {
+        foreground = false
+        heartbeatJob?.cancel()
+        presenceJob?.cancel()
+        tickerJob?.cancel()
+        heartbeatJob = null
+        presenceJob = null
+        tickerJob = null
+    }
+
+    /** Any real interaction. Wired to a root-level pointer listener. */
+    fun noteActivity() {
+        lastActivityAt = System.currentTimeMillis()
+    }
+
+    /** Marks the player as in a match so friends see it, or clears the claim. */
+    fun setInMatch(mode: GameMode?) {
+        inMatchMode = mode?.name
+        noteActivity()
+        // Push immediately rather than waiting for the next tick — entering and
+        // leaving a match are exactly the moments friends care about.
+        val token = prefs.sessionToken ?: return
+        viewModelScope.launch {
+            api.presencePing(token, inMatchMode)?.let { friends ->
+                _uiState.update { it.copy(friends = friends) }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- bootstrap
+
     /**
      * Restores a registered session if the stored token still works, otherwise
      * falls back to a guest identity so the player can always play.
@@ -79,9 +178,11 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
                     _uiState.update {
                         it.copy(
                             identity = Identity.Registered(profile),
+                            friends = profile.friends,
                             bootstrapped = true
                         )
                     }
+                    startPresence()
                     return@launch
                 }
                 // Token no longer valid — drop it and continue as a guest.
@@ -103,32 +204,154 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         prefs.guestId = session.guestId
-        _uiState.update { it.copy(identity = Identity.Guest(session), error = null) }
-        startHeartbeat()
+        _uiState.update {
+            it.copy(identity = Identity.Guest(session), friends = emptyList(), error = null)
+        }
+        publishExpiry(session.expiresAt)
+        // Loops belong to the foreground only; starting them here unconditionally
+        // would let a backgrounded app keep the session alive and issue requests.
+        if (foreground) {
+            startTicker()
+            startHeartbeat()
+        }
     }
 
+    // -------------------------------------------------------------- keep-alive
+
     /**
-     * Keeps an active guest's id alive. If the id has already lapsed the server
-     * says so and we transparently take a fresh one, which is exactly the
-     * recycle behaviour a temporary identity should have.
+     * Slides the guest expiry forward, but only when the player has actually
+     * done something recently. Without that condition an open app would extend
+     * the session forever and the idle limit would be meaningless.
      */
     private fun startHeartbeat() {
         heartbeatJob?.cancel()
         heartbeatJob = viewModelScope.launch {
             while (isActive) {
-                delay(HEARTBEAT_INTERVAL_MS)
+                delay(HEARTBEAT_TICK_MS)
+                if (!foreground) return@launch
+
                 val current = _uiState.value.identity
                 if (current !is Identity.Guest) return@launch
+
+                val idleFor = System.currentTimeMillis() - lastActivityAt
+                if (idleFor > ACTIVITY_WINDOW_MS) continue
 
                 val refreshed = api.guestHeartbeat(current.session.guestId)
                 if (refreshed != null) {
                     _uiState.update { it.copy(identity = Identity.Guest(refreshed)) }
+                    publishExpiry(refreshed.expiresAt)
                 } else {
-                    Log.d(TAG, "Guest id lapsed; requesting a new one")
-                    prefs.guestId = null
-                    ensureGuestSession()
+                    Log.d(TAG, "Guest id lapsed during heartbeat")
+                    handleLapse()
                     return@launch
                 }
+            }
+        }
+    }
+
+    /**
+     * Explicit "keep me in" from the expiry warning. Counts as activity and
+     * checks in straight away so the countdown visibly resets.
+     */
+    fun extendGuestSession() {
+        noteActivity()
+        val current = _uiState.value.identity as? Identity.Guest ?: return
+        viewModelScope.launch {
+            val refreshed = api.guestHeartbeat(current.session.guestId)
+            if (refreshed != null) {
+                _uiState.update {
+                    it.copy(identity = Identity.Guest(refreshed), notice = "Session extended.")
+                }
+                publishExpiry(refreshed.expiresAt)
+            } else {
+                handleLapse()
+            }
+        }
+    }
+
+    /** Publishes a fresh countdown roughly once a second while a guest is active. */
+    private fun startTicker() {
+        if (!foreground) return
+        tickerJob?.cancel()
+        tickerJob = viewModelScope.launch {
+            while (isActive) {
+                if (!foreground) return@launch
+                val current = _uiState.value.identity
+                if (current !is Identity.Guest) {
+                    _guestExpiry.value = null
+                    delay(2_000L)
+                    continue
+                }
+
+                publishExpiry(current.session.expiresAt)
+                if (_guestExpiry.value?.level == ExpiryLevel.LAPSED) handleLapse()
+                delay(1_000L)
+            }
+        }
+    }
+
+    private fun publishExpiry(expiresAt: Long) {
+        val remaining = (expiresAt - System.currentTimeMillis()).coerceAtLeast(0L)
+        _guestExpiry.value = GuestExpiryState(
+            expiresAt = expiresAt,
+            remainingMs = remaining,
+            level = when {
+                remaining <= 0L -> ExpiryLevel.LAPSED
+                remaining <= EXPIRY_CRITICAL_MS -> ExpiryLevel.CRITICAL
+                remaining <= EXPIRY_WARNING_MS -> ExpiryLevel.WARNING
+                else -> ExpiryLevel.SAFE
+            }
+        )
+    }
+
+    /**
+     * The guest id is gone. Take a fresh one and say so plainly — silently
+     * swapping identities would make a player's stats appear to vanish.
+     */
+    private fun handleLapse() {
+        if (handlingLapse) return
+        handlingLapse = true
+
+        viewModelScope.launch {
+            prefs.guestId = null
+            ensureGuestSession()
+            _uiState.update {
+                it.copy(notice = "Guest session expired. You're on a fresh guest id — register to keep your run next time.")
+            }
+            handlingLapse = false
+        }
+    }
+
+    // ----------------------------------------------------------------- presence
+
+    /** Tells the server the player is here, and refreshes friends' presence. */
+    private fun startPresence() {
+        if (!foreground) return
+        presenceJob?.cancel()
+        presenceJob = viewModelScope.launch {
+            while (isActive) {
+                val token = prefs.sessionToken
+                if (token == null) return@launch
+
+                // A match keeps you visible as playing even while the ping loop
+                // sees no taps, so IN_MATCH is reported regardless of idleness.
+                val idleFor = System.currentTimeMillis() - lastActivityAt
+                if (inMatchMode != null || idleFor <= ACTIVITY_WINDOW_MS) {
+                    api.presencePing(token, inMatchMode)?.let { friends ->
+                        _uiState.update { it.copy(friends = friends) }
+                    }
+                }
+                delay(PRESENCE_TICK_MS)
+            }
+        }
+    }
+
+    /** One-shot friends refresh, used when the friends list appears. */
+    fun refreshFriends() {
+        val token = prefs.sessionToken ?: return
+        viewModelScope.launch {
+            api.friends(token)?.let { friends ->
+                _uiState.update { it.copy(friends = friends) }
             }
         }
     }
@@ -208,17 +431,30 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
     private fun adoptSession(result: AuthResult) {
         heartbeatJob?.cancel()
         heartbeatJob = null
+        _guestExpiry.value = null
+
         prefs.sessionToken = result.token
         prefs.playerName = result.profile.username
         // The guest id is now owned by the server (retired if transferred).
         prefs.guestId = null
-        _uiState.update { it.copy(identity = Identity.Registered(result.profile)) }
+        _uiState.update {
+            it.copy(
+                identity = Identity.Registered(result.profile),
+                friends = result.profile.friends
+            )
+        }
+        startPresence()
     }
 
     fun logout() {
         val token = prefs.sessionToken
         prefs.sessionToken = null
-        _uiState.update { it.copy(identity = Identity.Unknown, notice = "Signed out.") }
+        presenceJob?.cancel()
+        presenceJob = null
+        inMatchMode = null
+        _uiState.update {
+            it.copy(identity = Identity.Unknown, friends = emptyList(), notice = "Signed out.")
+        }
 
         viewModelScope.launch {
             if (token != null) api.logout(token)
@@ -235,12 +471,17 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
 
         viewModelScope.launch {
             when (val outcome = api.addFriend(token, username.trim())) {
-                is AuthOutcome.Ok -> _uiState.update {
-                    it.copy(
-                        busy = false,
-                        identity = Identity.Registered(outcome.value),
-                        notice = "Added $username."
-                    )
+                is AuthOutcome.Ok -> {
+                    _uiState.update {
+                        it.copy(
+                            busy = false,
+                            identity = Identity.Registered(outcome.value),
+                            friends = outcome.value.friends,
+                            notice = "Added $username."
+                        )
+                    }
+                    // Pull presence for the new friend straight away.
+                    refreshFriends()
                 }
 
                 is AuthOutcome.Invalid -> _uiState.update {
@@ -265,6 +506,7 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
                     it.copy(
                         busy = false,
                         identity = Identity.Registered(outcome.value),
+                        friends = outcome.value.friends,
                         notice = "Removed $username."
                     )
                 }
@@ -289,7 +531,9 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
                 is Identity.Registered -> {
                     val token = prefs.sessionToken ?: return@launch
                     api.me(token)?.let { profile ->
-                        _uiState.update { it.copy(identity = Identity.Registered(profile)) }
+                        _uiState.update {
+                            it.copy(identity = Identity.Registered(profile), friends = profile.friends)
+                        }
                     }
                 }
 
@@ -297,10 +541,10 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
                     val refreshed = api.guestMe(current.session.guestId)
                     if (refreshed != null) {
                         _uiState.update { it.copy(identity = Identity.Guest(refreshed)) }
+                        publishExpiry(refreshed.expiresAt)
                     } else {
                         // The id lapsed while we were away — take a fresh one.
-                        prefs.guestId = null
-                        ensureGuestSession()
+                        handleLapse()
                     }
                 }
 
@@ -314,6 +558,7 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         val trimmed = name.trim().take(16)
         if (trimmed.isBlank()) return
         prefs.playerName = trimmed
+        noteActivity()
 
         val current = _uiState.value.identity
         if (current !is Identity.Guest) return
@@ -324,6 +569,7 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
             api.guestSession(current.session.guestId, trimmed)?.let { session ->
                 prefs.guestId = session.guestId
                 _uiState.update { it.copy(identity = Identity.Guest(session)) }
+                publishExpiry(session.expiresAt)
             }
         }
     }
@@ -335,6 +581,8 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         super.onCleared()
         heartbeatJob?.cancel()
+        presenceJob?.cancel()
+        tickerJob?.cancel()
         api.shutdown()
     }
 }

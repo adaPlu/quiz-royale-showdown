@@ -26,13 +26,17 @@ import {
 } from "./auth-core";
 import {
   applyOutcome,
+  applyRank,
+  derivePresence,
   emptyStats,
   mergeStats,
+  normalizeStats,
   SESSION_TTL_MS,
   type AuthResultDto,
   type FriendDto,
   type MatchOutcome,
   type PlayerStats,
+  type PresenceRecord,
   type UserProfileDto,
 } from "./identity";
 import { callDo, callDoJson, GUEST_REGISTRY_ID, LEADERBOARD_ID, type DoEnv } from "./do-dispatch";
@@ -57,6 +61,11 @@ type SessionRecord = {
 
 const MAX_FRIENDS = 200;
 
+/** Presence lives under its own key so a check-in never rewrites the account. */
+function presenceKey(userId: string): string {
+  return `pres:${userId}`;
+}
+
 export class UserDirectory extends DurableObject<DoEnv> {
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -80,6 +89,12 @@ export class UserDirectory extends DurableObject<DoEnv> {
           return await this.removeFriend(request);
         case "GET /users/search":
           return await this.searchUsers(url);
+        case "GET /friends":
+          return await this.listFriends(request);
+        case "POST /presence/ping":
+          return await this.presencePing(request);
+        case "POST /internal/presence":
+          return await this.internalPresence(request);
         case "POST /internal/report":
           return await this.report(request);
         default:
@@ -315,6 +330,78 @@ export class UserDirectory extends DurableObject<DoEnv> {
     return json({ ok: true, profile: await this.toProfile(me) });
   }
 
+  /**
+   * Friends plus live presence, without the rest of the profile. The friends
+   * list polls this while it is on screen, so it is deliberately cheap.
+   */
+  private async listFriends(request: Request): Promise<Response> {
+    const me = await this.authenticate(request);
+    if (!me) return json({ error: "unauthorized" }, 401);
+
+    // Reading your friends list is itself a sign of life.
+    await this.touchPresence(me.userId, null);
+    return json({ friends: await this.hydrateFriends(me) });
+  }
+
+  // ----------------------------------------------------------------- presence
+
+  /** Client check-in. Called on a timer while the app is in the foreground. */
+  private async presencePing(request: Request): Promise<Response> {
+    const me = await this.authenticate(request);
+    if (!me) return json({ error: "unauthorized" }, 401);
+
+    const body = await safeJson(request);
+    const inMatch = body.status === "IN_MATCH";
+    const mode = typeof body.matchMode === "string" ? body.matchMode.slice(0, 16) : null;
+
+    await this.touchPresence(me.userId, inMatch ? { matchMode: mode } : null);
+    return json({ ok: true, friends: await this.hydrateFriends(me) });
+  }
+
+  /**
+   * Presence written by a match room rather than the client. This is the
+   * authoritative path for IN_MATCH: the room knows who is actually playing, so
+   * a client cannot fake being in a match it never joined.
+   */
+  private async internalPresence(request: Request): Promise<Response> {
+    const body = await safeJson(request);
+    const userId = typeof body.userId === "string" ? body.userId : "";
+    if (!userId) return json({ error: "bad_request" }, 400);
+    if (!(await this.ctx.storage.get<UserRecord>(`user:${userId}`))) {
+      return json({ ok: false, reason: "unknown_user" });
+    }
+
+    const inMatch = body.status === "IN_MATCH";
+    const mode = typeof body.matchMode === "string" ? body.matchMode.slice(0, 16) : null;
+    await this.touchPresence(userId, inMatch ? { matchMode: mode } : null);
+    return json({ ok: true });
+  }
+
+  /**
+   * Records a sign of life. Passing null means "active but not in a match";
+   * passing a match descriptor sets the IN_MATCH claim.
+   */
+  private async touchPresence(
+    userId: string,
+    match: { matchMode: string | null } | null,
+  ): Promise<void> {
+    const now = Date.now();
+    const previous = await this.ctx.storage.get<PresenceRecord>(presenceKey(userId));
+
+    // Only move statusAt when the status actually changes, so the IN_MATCH
+    // window measures how long the claim has stood rather than being pushed
+    // forward by every unrelated ping.
+    const status = match ? ("IN_MATCH" as const) : ("IDLE" as const);
+    const changed = previous?.status !== status || previous?.matchMode !== (match?.matchMode ?? null);
+
+    await this.ctx.storage.put(presenceKey(userId), {
+      lastSeenAt: now,
+      status,
+      matchMode: match?.matchMode ?? null,
+      statusAt: changed ? now : (previous?.statusAt ?? now),
+    } satisfies PresenceRecord);
+  }
+
   private async searchUsers(url: URL): Promise<Response> {
     const q = (url.searchParams.get("q") ?? "").trim().toLowerCase();
     if (q.length < 2) return json({ results: [] });
@@ -342,8 +429,12 @@ export class UserDirectory extends DurableObject<DoEnv> {
     if (!record) return json({ error: "not_found" }, 404);
 
     record.stats = applyOutcome(record.stats, outcome);
+
+    // Sync first so the rank we read back reflects the points just earned, then
+    // fold that rank in as a possible new personal best.
+    const worldRank = await this.syncLeaderboard(record);
+    record.stats = applyRank(record.stats, worldRank);
     await this.ctx.storage.put(`user:${record.userId}`, record);
-    await this.syncLeaderboard(record);
 
     return json({ ok: true, stats: record.stats });
   }
@@ -386,42 +477,72 @@ export class UserDirectory extends DurableObject<DoEnv> {
     return { token, expiresAt };
   }
 
-  private async toProfile(record: UserRecord): Promise<UserProfileDto> {
+  /** Resolves friend edges into rows carrying stats and live presence. */
+  private async hydrateFriends(record: UserRecord): Promise<FriendDto[]> {
+    const now = Date.now();
     const friends: FriendDto[] = [];
+
     for (const edge of record.friends) {
       const friend = await this.ctx.storage.get<UserRecord>(`user:${edge.userId}`);
       if (!friend) continue;
+
+      const presence = derivePresence(
+        await this.ctx.storage.get<PresenceRecord>(presenceKey(friend.userId)),
+        now,
+      );
+
       friends.push({
         userId: friend.userId,
         username: friend.username,
         totalPoints: friend.stats.totalPoints,
         wins: friend.stats.wins,
         addedAt: edge.addedAt,
+        presence: presence.presence,
+        matchMode: presence.matchMode,
+        lastSeenAt: presence.lastSeenAt,
       });
     }
-    friends.sort((a, b) => b.totalPoints - a.totalPoints);
 
+    // Active friends first — that is what the list is for — then by points.
+    const weight: Record<string, number> = { IN_MATCH: 0, ONLINE: 1, OFFLINE: 2 };
+    friends.sort((a, b) => {
+      const rank = (weight[a.presence] ?? 2) - (weight[b.presence] ?? 2);
+      if (rank !== 0) return rank;
+      return b.totalPoints - a.totalPoints;
+    });
+    return friends;
+  }
+
+  private async toProfile(record: UserRecord): Promise<UserProfileDto> {
     return {
       kind: "USER",
       userId: record.userId,
       username: record.username,
       email: record.email,
       createdAt: record.createdAt,
-      stats: record.stats,
-      friends,
+      stats: normalizeStats(record.stats),
+      friends: await this.hydrateFriends(record),
     };
   }
 
-  private async syncLeaderboard(record: UserRecord): Promise<void> {
-    await callDo(this.env, "Leaderboard", LEADERBOARD_ID, "/internal/upsert", {
-      method: "POST",
-      body: {
-        subjectKind: "USER",
-        subjectId: record.userId,
-        displayName: record.username,
-        stats: record.stats,
+  /** Upserts the board row and returns the world rank it produced, if any. */
+  private async syncLeaderboard(record: UserRecord): Promise<number | null> {
+    const result = await callDoJson<{ worldRank: number | null }>(
+      this.env,
+      "Leaderboard",
+      LEADERBOARD_ID,
+      "/internal/upsert",
+      {
+        method: "POST",
+        body: {
+          subjectKind: "USER",
+          subjectId: record.userId,
+          displayName: record.username,
+          stats: record.stats,
+        },
       },
-    }).catch(() => undefined);
+    ).catch(() => null);
+    return result?.worldRank ?? null;
   }
 }
 

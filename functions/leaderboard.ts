@@ -157,7 +157,19 @@ export class Leaderboard extends DurableObject {
     };
 
     await this.ctx.storage.put(`entry:${subjectKind}:${subjectId}`, entry);
-    return json({ ok: true });
+
+    // Report back the world rank this write produced. The caller persists it as
+    // `bestRank`, which is what makes a leaderboard milestone permanent: the
+    // rank is captured at the instant it is held, not re-derived later when
+    // other players may have overtaken this one.
+    const ranked = await this.rankedFor(WORLD_BOARD);
+    const index = ranked.findIndex((row) => row.entry.subjectId === subjectId);
+
+    return json({
+      ok: true,
+      worldRank: index >= 0 ? index + 1 : null,
+      totalRanked: ranked.length,
+    });
   }
 
   private async drop(request: Request): Promise<Response> {

@@ -20,14 +20,16 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   applyOutcome,
+  applyRank,
   emptyStats,
   GUEST_SWEEP_MS,
   GUEST_TTL_MS,
+  normalizeStats,
   type GuestSessionDto,
   type MatchOutcome,
   type PlayerStats,
 } from "./identity";
-import { callDo, LEADERBOARD_ID, type DoEnv } from "./do-dispatch";
+import { callDo, callDoJson, LEADERBOARD_ID, type DoEnv } from "./do-dispatch";
 
 /**
  * Session-scoped guest state. Note what is absent by design: no email, no
@@ -205,18 +207,28 @@ export class GuestRegistry extends DurableObject<DoEnv> {
     session.stats = applyOutcome(session.stats, outcome);
     session.lastSeenAt = Date.now();
     session.expiresAt = session.lastSeenAt + GUEST_TTL_MS;
-    await this.ctx.storage.put(key(session.guestId), session);
 
-    await callDo(this.env, "Leaderboard", LEADERBOARD_ID, "/internal/upsert", {
-      method: "POST",
-      body: {
-        subjectKind: "GUEST",
-        subjectId: session.guestId,
-        displayName: session.displayName,
-        stats: session.stats,
-        expiresAt: session.expiresAt,
+    // Guests earn leaderboard milestones too — they just lose them along with
+    // the rest of the session unless they register and carry the stats over.
+    const upsert = await callDoJson<{ worldRank: number | null }>(
+      this.env,
+      "Leaderboard",
+      LEADERBOARD_ID,
+      "/internal/upsert",
+      {
+        method: "POST",
+        body: {
+          subjectKind: "GUEST",
+          subjectId: session.guestId,
+          displayName: session.displayName,
+          stats: session.stats,
+          expiresAt: session.expiresAt,
+        },
       },
-    }).catch(() => undefined);
+    ).catch(() => null);
+
+    session.stats = applyRank(session.stats, upsert?.worldRank ?? null);
+    await this.ctx.storage.put(key(session.guestId), session);
 
     return json({ ok: true, stats: session.stats });
   }
@@ -305,7 +317,7 @@ function toDto(session: GuestSession): GuestSessionDto {
     guestId: session.guestId,
     displayName: session.displayName,
     expiresAt: session.expiresAt,
-    stats: session.stats,
+    stats: normalizeStats(session.stats),
   };
 }
 

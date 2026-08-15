@@ -22,6 +22,22 @@ export const GUEST_SWEEP_MS = 5 * 60 * 1000;
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
+ * How recently a registered player must have checked in to count as online.
+ * Deliberately a little over twice the client's ping interval, so one dropped
+ * request does not make a friend flicker to offline.
+ */
+export const PRESENCE_ONLINE_WINDOW_MS = 100 * 1000;
+
+/**
+ * An IN_MATCH claim self-expires: if a client dies mid-match we must not show
+ * that player as "in a match" forever. Longer than the longest possible match.
+ */
+export const PRESENCE_MATCH_WINDOW_MS = 12 * 60 * 1000;
+
+/** What a friend is doing right now, as far as the server can tell. */
+export type PresenceStatus = "OFFLINE" | "ONLINE" | "IN_MATCH";
+
+/**
  * The competitive counters. Guests and registered users track the SAME shape —
  * that is what lets one leaderboard rank both — but a guest's copy is session
  * state that dies with the guest, while a user's copy is persisted forever.
@@ -41,6 +57,13 @@ export type PlayerStats = {
   powerUpCharges: number;
   /** Points earned per trivia category, drives the category leaderboards. */
   categoryPoints: Record<string, number>;
+  /**
+   * Best (lowest) world leaderboard rank this subject has ever held, recorded
+   * at the moment it was reached. Persisted rather than derived because a
+   * milestone must stay earned even after other players overtake you — a badge
+   * that silently disappears is worse than no badge.
+   */
+  bestRank: number | null;
 };
 
 export function emptyStats(): PlayerStats {
@@ -55,7 +78,29 @@ export function emptyStats(): PlayerStats {
     powerUpsUsed: 0,
     powerUpCharges: 3,
     categoryPoints: {},
+    bestRank: null,
   };
+}
+
+/**
+ * Fills in fields absent from records written by an earlier version, so reading
+ * old storage never yields `undefined` where the type promises a value.
+ */
+export function normalizeStats(stats: PlayerStats): PlayerStats {
+  return {
+    ...emptyStats(),
+    ...stats,
+    categoryPoints: stats.categoryPoints ?? {},
+    bestRank: stats.bestRank ?? null,
+  };
+}
+
+/** Folds a newly observed leaderboard rank into a stat block, keeping the best. */
+export function applyRank(stats: PlayerStats, rank: number | null): PlayerStats {
+  if (rank === null || rank <= 0) return stats;
+  const current = stats.bestRank;
+  if (current !== null && current <= rank) return stats;
+  return { ...stats, bestRank: rank };
 }
 
 /** What a finished match contributes to one player's record. */
@@ -77,7 +122,8 @@ export type MatchOutcome = {
 };
 
 /** Folds a finished match into a stat block. Pure, so it is trivially testable. */
-export function applyOutcome(stats: PlayerStats, outcome: MatchOutcome): PlayerStats {
+export function applyOutcome(base: PlayerStats, outcome: MatchOutcome): PlayerStats {
+  const stats = normalizeStats(base);
   const categoryPoints = { ...stats.categoryPoints };
   for (const [category, points] of Object.entries(outcome.categoryPoints)) {
     categoryPoints[category] = (categoryPoints[category] ?? 0) + points;
@@ -106,11 +152,14 @@ export function applyOutcome(stats: PlayerStats, outcome: MatchOutcome): PlayerS
       stats.powerUpCharges - outcome.powerUpsUsed + (outcome.won ? 2 : 1),
     ),
     categoryPoints,
+    bestRank: stats.bestRank,
   };
 }
 
 /** Merges two stat blocks. Used for the guest -> registered transfer. */
-export function mergeStats(base: PlayerStats, incoming: PlayerStats): PlayerStats {
+export function mergeStats(rawBase: PlayerStats, rawIncoming: PlayerStats): PlayerStats {
+  const base = normalizeStats(rawBase);
+  const incoming = normalizeStats(rawIncoming);
   const categoryPoints = { ...base.categoryPoints };
   for (const [category, points] of Object.entries(incoming.categoryPoints)) {
     categoryPoints[category] = (categoryPoints[category] ?? 0) + points;
@@ -119,6 +168,7 @@ export function mergeStats(base: PlayerStats, incoming: PlayerStats): PlayerStat
   const placements = [base.bestPlacement, incoming.bestPlacement].filter(
     (p): p is number => p !== null,
   );
+  const ranks = [base.bestRank, incoming.bestRank].filter((r): r is number => r !== null);
 
   return {
     wins: base.wins + incoming.wins,
@@ -131,6 +181,7 @@ export function mergeStats(base: PlayerStats, incoming: PlayerStats): PlayerStat
     powerUpsUsed: base.powerUpsUsed + incoming.powerUpsUsed,
     powerUpCharges: base.powerUpCharges + incoming.powerUpCharges,
     categoryPoints,
+    bestRank: ranks.length > 0 ? Math.min(...ranks) : null,
   };
 }
 
@@ -163,7 +214,43 @@ export type FriendDto = {
   totalPoints: number;
   wins: number;
   addedAt: number;
+  /** Live presence, derived server-side from the friend's last check-in. */
+  presence: PresenceStatus;
+  /** Set only when presence is IN_MATCH, so the UI can name the mode. */
+  matchMode: string | null;
+  /** Epoch ms of the friend's last check-in. 0 when never seen. */
+  lastSeenAt: number;
 };
+
+/** What a client reports about itself, and what the room reports on its behalf. */
+export type PresenceRecord = {
+  lastSeenAt: number;
+  status: "IDLE" | "IN_MATCH";
+  matchMode: string | null;
+  /** When the current status was set, used to expire a stale IN_MATCH claim. */
+  statusAt: number;
+};
+
+/** Collapses a stored presence record into what friends should see. */
+export function derivePresence(
+  record: PresenceRecord | null | undefined,
+  now = Date.now(),
+): { presence: PresenceStatus; matchMode: string | null; lastSeenAt: number } {
+  if (!record) return { presence: "OFFLINE", matchMode: null, lastSeenAt: 0 };
+
+  // Being in a match keeps you visible even if the ping loop is paused by the
+  // match screen, but only until the claim ages out.
+  const inMatch =
+    record.status === "IN_MATCH" && now - record.statusAt < PRESENCE_MATCH_WINDOW_MS;
+  if (inMatch) {
+    return { presence: "IN_MATCH", matchMode: record.matchMode, lastSeenAt: record.lastSeenAt };
+  }
+
+  if (now - record.lastSeenAt <= PRESENCE_ONLINE_WINDOW_MS) {
+    return { presence: "ONLINE", matchMode: null, lastSeenAt: record.lastSeenAt };
+  }
+  return { presence: "OFFLINE", matchMode: null, lastSeenAt: record.lastSeenAt };
+}
 
 export type LeaderboardEntryDto = {
   rank: number;

@@ -131,6 +131,12 @@ export class MatchRoom extends DurableObject<Env> {
       state.order.push(playerId);
     }
 
+    // Presence is written here rather than trusted from the client: the room is
+    // the only party that actually knows who joined a match.
+    if (subjectKind === "USER") {
+      this.ctx.waitUntil(this.reportPresence(playerId, "IN_MATCH", mode));
+    }
+
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server);
@@ -192,6 +198,12 @@ export class MatchRoom extends DurableObject<Env> {
     const player = state.players[attachment.playerId];
     if (player) player.connected = false;
 
+    // Leaving the socket clears the IN_MATCH claim immediately, so a friend who
+    // quits does not appear to still be playing until the claim ages out.
+    if (player?.subjectKind === "USER") {
+      this.ctx.waitUntil(this.reportPresence(player.id, "IDLE", null));
+    }
+
     // A player who drops during the lobby leaves no ghost behind.
     if (state.phase === "LOBBY" && player && !player.isBot) {
       delete state.players[attachment.playerId];
@@ -199,6 +211,22 @@ export class MatchRoom extends DurableObject<Env> {
     }
     this.persist();
     this.broadcast();
+  }
+
+  /** Tells UserDirectory what a registered player is doing. Never throws. */
+  private async reportPresence(
+    userId: string,
+    status: "IDLE" | "IN_MATCH",
+    matchMode: GameMode | null,
+  ): Promise<void> {
+    try {
+      await callDo(this.env, "UserDirectory", USER_DIRECTORY_ID, "/internal/presence", {
+        method: "POST",
+        body: { userId, status, matchMode },
+      });
+    } catch (error) {
+      console.error("presence report failed", (error as Error)?.message);
+    }
   }
 
   /** Durable backstop: fires even if the room hibernated with no traffic. */
@@ -446,6 +474,13 @@ export class MatchRoom extends DurableObject<Env> {
       const outcomes = this.buildOutcomes(state);
       // Fire-and-forget: the results screen must not wait on stat persistence.
       this.ctx.waitUntil(this.reportOutcomes(outcomes));
+
+      // The match is over even if players linger on the results screen, so drop
+      // the IN_MATCH claim now rather than when the socket eventually closes.
+      for (const outcome of outcomes) {
+        if (outcome.subjectKind !== "USER") continue;
+        this.ctx.waitUntil(this.reportPresence(outcome.subjectId, "IDLE", null));
+      }
     }
     this.persist();
   }
