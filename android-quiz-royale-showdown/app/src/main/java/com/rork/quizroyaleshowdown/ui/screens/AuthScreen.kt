@@ -54,6 +54,7 @@ import com.rork.quizroyaleshowdown.ui.components.ArenaBanner
 import com.rork.quizroyaleshowdown.ui.components.ArenaButton
 import com.rork.quizroyaleshowdown.ui.components.ArenaCheckRow
 import com.rork.quizroyaleshowdown.ui.components.ArenaTextField
+import com.rork.quizroyaleshowdown.ui.components.LegalLinks
 import com.rork.quizroyaleshowdown.ui.components.PressableSurface
 import com.rork.quizroyaleshowdown.ui.theme.Arena
 
@@ -313,6 +314,18 @@ fun AuthScreen(
             }
 
             Spacer(Modifier.height(18.dp))
+
+            // Consent belongs at the point of account creation, not buried in a
+            // settings screen, so the links sit directly under the submit button.
+            LegalLinks(
+                prefix = if (mode == AuthMode.REGISTER) {
+                    "By creating an account you agree to our"
+                } else {
+                    null
+                }
+            )
+
+            Spacer(Modifier.height(16.dp))
 
             Text(
                 text = "Not ready? You can keep playing as a guest.",

@@ -56,6 +56,7 @@ import com.rork.quizroyaleshowdown.ui.components.ArenaTextField
 import com.rork.quizroyaleshowdown.ui.components.BadgeCollection
 import com.rork.quizroyaleshowdown.ui.components.GuestExpiryWarning
 import com.rork.quizroyaleshowdown.ui.components.GuestSessionChip
+import com.rork.quizroyaleshowdown.ui.components.LegalLinks
 import com.rork.quizroyaleshowdown.ui.components.PresenceDot
 import com.rork.quizroyaleshowdown.ui.components.PresenceRow
 import com.rork.quizroyaleshowdown.ui.components.PressableSurface
@@ -296,6 +297,13 @@ fun ProfileScreen(
 
                 Identity.Unknown -> Unit
             }
+
+            // Shown for every identity kind, including guests, so the documents
+            // stay reachable without an account.
+            Spacer(Modifier.height(28.dp))
+            SectionHeader("Legal")
+            Spacer(Modifier.height(10.dp))
+            LegalLinks()
         }
     }
 }

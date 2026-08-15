@@ -22,6 +22,11 @@
 //   GET  /leaderboard?board=WORLD|<category>  ranked board (guests + users)
 //   GET  /leaderboard/boards                  the list of available boards
 //
+//   GET  /legal | /legal/privacy | /legal/terms | /legal/eula
+//        Public, unauthenticated legal documents. Play Console and App Store
+//        Review both require a reachable privacy policy URL, so these are served
+//        from here rather than needing a separate static host.
+//
 // Presence is deliberately friends-only: /friends is the sole way to read it,
 // and it requires a session token, so a player's activity is never public.
 //
@@ -46,6 +51,7 @@ import {
   type DoEnv,
 } from "./do-dispatch";
 import { MODE_CONFIG, type GameMode } from "./protocol";
+import { handleLegal } from "./legal";
 import type { GuestSessionDto, SubjectKind } from "./identity";
 
 type Env = DoEnv;
@@ -80,6 +86,13 @@ export default {
 
     if (url.pathname === "/health") {
       return Response.json({ ok: true, service: "quiz-royale", now: Date.now() }, { headers: CORS });
+    }
+
+    // Plain public HTML: no auth, no DO hop. Checked before the route table so a
+    // store reviewer or crawler never touches the game path.
+    if (url.pathname.startsWith("/legal")) {
+      const legal = handleLegal(url.pathname);
+      if (legal) return legal;
     }
 
     if (url.pathname === "/matchmake" && request.method === "GET") {
