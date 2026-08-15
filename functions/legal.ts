@@ -18,10 +18,10 @@
 
 /**
  * The single contact address published in both documents.
- * REPLACE THIS with a mailbox you actually monitor before submitting to a store —
- * both Google Play and Apple reject listings whose privacy contact bounces.
+ * Changing this value updates the Privacy Policy, the Terms, and the legal index
+ * together, so the store listing and the hosted documents can never disagree.
  */
-export const LEGAL_CONTACT_EMAIL = "support@quizroyaleshowdown.app";
+export const LEGAL_CONTACT_EMAIL = "quizroyaleshowdown@gmail.com";
 
 /** Legal entity named as the data controller. Replace if you incorporate. */
 export const LEGAL_ENTITY = "the Quiz Royale Showdown team";

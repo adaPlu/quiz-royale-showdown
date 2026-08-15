@@ -72,7 +72,7 @@ Requires an internet connection.
 Privacy Policy: https://quiz-royale-showdown-backend.rork.app/legal/privacy
 Terms and Conditions: https://quiz-royale-showdown-backend.rork.app/legal/terms
 End User License Agreement (Apple Standard EULA): https://www.apple.com/legal/internet-services/itunes/dev/stdeula/
-Support: support@quizroyaleshowdown.app
+Support: quizroyaleshowdown@gmail.com
 ```
 
 ---
@@ -87,6 +87,12 @@ Support: support@quizroyaleshowdown.app
 | In-app purchases | **No** |
 | Target age | 13+ |
 | Internet required | Yes |
+
+## Contact email
+
+`quizroyaleshowdown@gmail.com` — set once as `LEGAL_CONTACT_EMAIL` in
+`functions/legal.ts` and rendered into the Privacy Policy, the Terms, and the legal
+index, so the listing and the hosted documents cannot drift apart.
 
 ## Data safety declaration
 
@@ -109,14 +115,32 @@ files, contacts, calendar, SMS, call logs, installed apps, device advertising ID
 
 **Security practices**
 - Data is encrypted in transit (TLS for HTTPS and WSS). ✅
-- Users can request account deletion via `support@quizroyaleshowdown.app`. ✅
+- Users can request account deletion via `quizroyaleshowdown@gmail.com`. ✅
 - Passwords are stored only as PBKDF2-SHA256 hashes. ✅
 
-## Before you publish
+## Phone screenshots
 
-1. Replace `support@quizroyaleshowdown.app` with a mailbox you monitor — it is set
-   in one place, `LEGAL_CONTACT_EMAIL` in `functions/legal.ts`, and appears in both
-   legal documents. Play rejects listings whose privacy contact bounces.
-2. If you incorporate, update `LEGAL_ENTITY` in the same file.
-3. Screenshots and feature graphic are still required (see the
-   `play-store-assets` skill).
+Seven real captures from the running build live in `store/screenshots/phone/`, in
+listing order:
+
+1. `01-main.png` — main screen: guest identity, live session countdown, Register button
+2. `02-quickstart.png` — Quick Match countdown lobby
+3. `03-question.png` — live round, 6 players standing, power-ups and opponent rail
+4. `04-tournament.png` — Tournament lobby: 15 rounds, 2 lives
+5. `05-midround.png` — another live question mid-match
+6. `06-register.png` — registration screen with the legal links
+7. `07-standings.png` — world leaderboard with category tabs
+
+Each is 810 x 1616, 24-bit PNG, no alpha.
+
+The originals were 720 x 1616 — a 2.24:1 ratio that Play **rejects**, because the
+longest side may not exceed twice the shortest. They are padded to 810 px wide with
+the app's own canvas ink (`#080B14`), which meets the 2:1 limit exactly without
+cropping any UI.
+
+## Still required before publishing
+
+1. **Play Console app record** — Google's API cannot create it; see below.
+2. **Feature graphic** — 1024 x 500, JPEG or 24-bit PNG, no alpha. Not yet made.
+3. Complete the Play Console content rating and target audience questionnaires.
+4. If you incorporate, update `LEGAL_ENTITY` in `functions/legal.ts`.
