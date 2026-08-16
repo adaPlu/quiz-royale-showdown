@@ -10,6 +10,11 @@
       "name": "Functions",
       "path": "functions",
       "framework": "cloudflare"
+    },
+    {
+      "name": "Railway API",
+      "path": "railway-api",
+      "framework": "node"
     }
   ]
 }

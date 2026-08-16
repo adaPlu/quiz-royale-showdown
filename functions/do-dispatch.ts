@@ -9,6 +9,9 @@ export type DoEnv = {
   PASSWORD_RESET_EMAIL_ENDPOINT?: string;
   PASSWORD_RESET_EMAIL_TOKEN?: string;
   PASSWORD_RESET_FROM?: string;
+  RAILWAY_API_URL?: string;
+  RAILWAY_INTERNAL_TOKEN?: string;
+  ALLOW_STATIC_QUESTIONS_FALLBACK?: string;
 };
 
 /** Singleton instance names for the stores that have exactly one shard. */

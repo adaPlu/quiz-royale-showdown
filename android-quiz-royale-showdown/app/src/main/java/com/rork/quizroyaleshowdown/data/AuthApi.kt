@@ -38,7 +38,7 @@ class AuthApi {
         install(ContentNegotiation) { json(json) }
     }
 
-    private val base: String get() = Backend.baseUrl
+    private val base: String get() = Backend.restBaseUrl
 
     // ------------------------------------------------------------ registration
 

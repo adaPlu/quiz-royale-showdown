@@ -47,6 +47,7 @@ import {
 } from "./do-dispatch";
 import { MODE_CONFIG, type GameMode } from "./protocol";
 import type { GuestSessionDto, SubjectKind } from "./identity";
+import { callRailwayJson } from "./railway-api";
 
 type Env = DoEnv;
 
@@ -177,6 +178,15 @@ async function handleMatchSocket(
 async function resolveIdentity(env: Env, url: URL): Promise<ResolvedIdentity | null> {
   const token = url.searchParams.get("token");
   if (token) {
+    const railway = await callRailwayJson<{ userId: string; username: string }>(
+      env,
+      "/auth/resolve",
+      { token },
+    );
+    if (railway) {
+      return { kind: "USER", subjectId: railway.userId, displayName: railway.username };
+    }
+
     const resolved = await dispatchToDo(
       env,
       "UserDirectory",
@@ -195,6 +205,14 @@ async function resolveIdentity(env: Env, url: URL): Promise<ResolvedIdentity | n
 
   const guestId = url.searchParams.get("guestId");
   if (guestId) {
+    const railway = await callRailwayJson<{ guestId: string; displayName: string }>(
+      env,
+      `/internal/guest/resolve?guestId=${encodeURIComponent(guestId)}`,
+    );
+    if (railway) {
+      return { kind: "GUEST", subjectId: railway.guestId, displayName: railway.displayName };
+    }
+
     const resolved = await dispatchToDo(
       env,
       "GuestRegistry",
@@ -211,6 +229,22 @@ async function resolveIdentity(env: Env, url: URL): Promise<ResolvedIdentity | n
   }
 
   // Safety net: issue a throwaway guest so the match still starts.
+  const railwayGuest = await callRailwayJson<{ guest: GuestSessionDto }>(
+    env,
+    "/guest/session",
+    {
+      method: "POST",
+      body: { displayName: url.searchParams.get("name") ?? "" },
+    },
+  );
+  if (railwayGuest) {
+    return {
+      kind: "GUEST",
+      subjectId: railwayGuest.guest.guestId,
+      displayName: railwayGuest.guest.displayName,
+    };
+  }
+
   const issued = await dispatchToDo(
     env,
     "GuestRegistry",

@@ -40,7 +40,7 @@ class GameClient {
         install(ContentNegotiation) { json(json) }
     }
 
-    private val baseUrl: String get() = Backend.baseUrl
+    private val baseUrl: String get() = Backend.matchHttpBase
 
     /** Asks the matchmaker which room to join for [mode]. */
     suspend fun findMatch(mode: GameMode, playerId: String): MatchmakeResponse {

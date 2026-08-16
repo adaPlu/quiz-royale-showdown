@@ -105,6 +105,7 @@ export function applyRank(stats: PlayerStats, rank: number | null): PlayerStats 
 
 /** What a finished match contributes to one player's record. */
 export type MatchOutcome = {
+  matchId: string;
   subjectKind: SubjectKind;
   subjectId: string;
   displayName: string;

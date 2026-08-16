@@ -6,3 +6,7 @@ node_modules
 # Cloudflare Functions
 functions/node_modules
 !functions/package.json
+
+# Railway API
+railway-api/node_modules
+railway-api/dist

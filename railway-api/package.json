@@ -1,0 +1,23 @@
+{
+  "name": "quiz-royale-railway-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "migrate": "node dist/migrate.js",
+    "import:questions": "node dist/import-questions.js",
+    "test": "node --test dist/**/*.test.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.1",
+    "redis": "^6.2.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.2"
+  }
+}
