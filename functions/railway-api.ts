@@ -10,13 +10,14 @@ export type RailwayEnv = {
 export async function callRailway(
   env: RailwayEnv,
   path: string,
-  init?: { method?: string; body?: unknown; token?: string },
+  init?: { method?: string; body?: unknown; token?: string; headers?: Record<string, string> },
 ): Promise<Response | null> {
   if (!env.RAILWAY_API_URL) return null;
   const base = env.RAILWAY_API_URL.replace(/\/+$/, "");
   const headers = new Headers();
   headers.set("Accept", "application/json");
   if (init?.body !== undefined) headers.set("Content-Type", "application/json");
+  for (const [key, value] of Object.entries(init?.headers ?? {})) headers.set(key, value);
   if (init?.token) headers.set("Authorization", `Bearer ${init.token}`);
   if (env.RAILWAY_INTERNAL_TOKEN) headers.set("X-Internal-Token", env.RAILWAY_INTERNAL_TOKEN);
 
@@ -30,7 +31,7 @@ export async function callRailway(
 export async function callRailwayJson<T>(
   env: RailwayEnv,
   path: string,
-  init?: { method?: string; body?: unknown; token?: string },
+  init?: { method?: string; body?: unknown; token?: string; headers?: Record<string, string> },
 ): Promise<T | null> {
   const response = await callRailway(env, path, init).catch(() => null);
   if (!response?.ok) return null;

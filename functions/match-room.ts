@@ -69,6 +69,7 @@ type PlayerState = {
   lastAnswerCorrect: boolean | null;
   removedOptions: number[];
   spentPowerUps: PowerUp[];
+  powerUpCharges: number;
   shieldActive: boolean;
   doubleActive: boolean;
 };
@@ -131,6 +132,7 @@ export class MatchRoom extends DurableObject<Env> {
     // Trusted: the Worker overwrites this after resolving the caller's identity,
     // so a client cannot claim to be a registered user.
     const subjectKind = parseSubjectKind(url.searchParams.get("kind"));
+    const powerUpCharges = clampInt(Number.parseInt(url.searchParams.get("powerUpCharges") ?? "", 10), 0, 99);
 
     const state = await this.ensureState(mode);
 
@@ -141,9 +143,11 @@ export class MatchRoom extends DurableObject<Env> {
       existing.connected = true;
       existing.name = name || existing.name;
       existing.subjectKind = subjectKind;
+      existing.powerUpCharges = powerUpCharges;
     } else if (state.phase === "LOBBY" && humanCount(state) < MODE_CONFIG[state.mode].maxPlayers) {
       const player = newPlayer(playerId, name, false, MODE_CONFIG[state.mode].lives);
       player.subjectKind = subjectKind;
+      player.powerUpCharges = powerUpCharges;
       state.players[playerId] = player;
       state.order.push(playerId);
     }
@@ -726,6 +730,10 @@ export class MatchRoom extends DurableObject<Env> {
       this.sendError(ws, "POWERUP_SPENT", "You already used that power-up.");
       return;
     }
+    if (player.spentPowerUps.length >= player.powerUpCharges) {
+      this.sendError(ws, "POWERUP_EMPTY", "You do not have a power-up charge available.");
+      return;
+    }
     if (player.answerIndex !== null) {
       this.sendError(ws, "ALREADY_ANSWERED", "You have already locked in an answer.");
       return;
@@ -959,7 +967,9 @@ export class MatchRoom extends DurableObject<Env> {
       placement: p.placement,
       answerIndex: p.answerIndex,
       removedOptions: p.removedOptions,
-      availablePowerUps: ALL_POWER_UPS.filter((pu) => !p.spentPowerUps.includes(pu)),
+      availablePowerUps: p.spentPowerUps.length < p.powerUpCharges
+        ? ALL_POWER_UPS.filter((pu) => !p.spentPowerUps.includes(pu))
+        : [],
       shieldActive: p.shieldActive,
       doubleActive: p.doubleActive,
     };
@@ -998,9 +1008,15 @@ function newPlayer(id: string, name: string, isBot: boolean, lives: number): Pla
     lastAnswerCorrect: null,
     removedOptions: [],
     spentPowerUps: [],
+    powerUpCharges: 0,
     shieldActive: false,
     doubleActive: false,
   };
+}
+
+function clampInt(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
 }
 
 function pickBotAnswer(question: Question, skill: number): number {

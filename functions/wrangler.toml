@@ -1,0 +1,11 @@
+name = "quiz-royale-functions"
+main = "index.ts"
+compatibility_date = "2026-08-22"
+
+[[durable_objects.bindings]]
+name = "DO"
+class_name = "MatchRoom"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["MatchRoom", "Matchmaker", "UserDirectory", "GuestRegistry", "Leaderboard"]

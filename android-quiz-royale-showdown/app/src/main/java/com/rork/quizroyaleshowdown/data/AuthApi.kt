@@ -47,6 +47,7 @@ class AuthApi {
         email: String,
         password: String,
         guestId: String?,
+        guestSecret: String?,
         transferStats: Boolean
     ): AuthOutcome<AuthResult> = runAuthCall {
         http.post("$base/auth/register") {
@@ -56,8 +57,9 @@ class AuthApi {
                     put("username", JsonPrimitive(username))
                     put("email", JsonPrimitive(email))
                     put("password", JsonPrimitive(password))
-                    if (guestId != null && transferStats) {
+                    if (guestId != null && guestSecret != null && transferStats) {
                         put("guestId", JsonPrimitive(guestId))
+                        put("guestSecret", JsonPrimitive(guestSecret))
                         put("transferStats", JsonPrimitive(true))
                     }
                 }
@@ -119,12 +121,13 @@ class AuthApi {
      * Issues a guest id, or renews [existingId] when it is still alive so a
      * returning player keeps their run.
      */
-    suspend fun guestSession(existingId: String?, displayName: String): GuestSession? = runCatching {
+    suspend fun guestSession(existingId: String?, existingSecret: String?, displayName: String): GuestSession? = runCatching {
         val response = http.post("$base/guest/session") {
             contentType(ContentType.Application.Json)
             setBody(
                 buildJsonObject {
                     if (existingId != null) put("guestId", JsonPrimitive(existingId))
+                    if (existingSecret != null) put("guestSecret", JsonPrimitive(existingSecret))
                     put("displayName", JsonPrimitive(displayName))
                 }
             )
@@ -137,27 +140,40 @@ class AuthApi {
     }
 
     /** Slides the guest's expiry forward. Null means the id already lapsed. */
-    suspend fun guestHeartbeat(guestId: String): GuestSession? = runCatching {
+    suspend fun guestHeartbeat(guestId: String, guestSecret: String): GuestSession? = runCatching {
         val response = http.post("$base/guest/heartbeat") {
             contentType(ContentType.Application.Json)
-            setBody(buildJsonObject { put("guestId", JsonPrimitive(guestId)) })
+            setBody(
+                buildJsonObject {
+                    put("guestId", JsonPrimitive(guestId))
+                    put("guestSecret", JsonPrimitive(guestSecret))
+                }
+            )
         }
         if (!response.status.isSuccess()) return null
         response.body<GuestSessionEnvelope>().guest
     }.getOrElse { null }
 
-    suspend fun guestMe(guestId: String): GuestSession? = runCatching {
-        val response = http.get("$base/guest/me") { parameter("guestId", guestId) }
+    suspend fun guestMe(guestId: String, guestSecret: String): GuestSession? = runCatching {
+        val response = http.get("$base/guest/me") {
+            header("X-Guest-Id", guestId)
+            header("X-Guest-Secret", guestSecret)
+        }
         if (!response.status.isSuccess()) return null
         response.body<GuestSessionEnvelope>().guest
     }.getOrElse { null }
 
     /** Retires a guest id immediately rather than waiting for the TTL sweep. */
-    suspend fun endGuest(guestId: String) {
+    suspend fun endGuest(guestId: String, guestSecret: String) {
         runCatching {
             http.post("$base/guest/end") {
                 contentType(ContentType.Application.Json)
-                setBody(buildJsonObject { put("guestId", JsonPrimitive(guestId)) })
+                setBody(
+                    buildJsonObject {
+                        put("guestId", JsonPrimitive(guestId))
+                        put("guestSecret", JsonPrimitive(guestSecret))
+                    }
+                )
             }
         }.onFailure { Log.w(TAG, "Guest end failed: ${it.message}") }
     }

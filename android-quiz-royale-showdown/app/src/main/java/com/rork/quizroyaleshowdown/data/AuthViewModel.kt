@@ -35,8 +35,8 @@ private const val PRESENCE_TICK_MS = 45L * 1000L
 private const val EXPIRY_WARNING_MS = 5L * 60L * 1000L
 private const val EXPIRY_CRITICAL_MS = 60L * 1000L
 
-/** Credentials handed to the match socket. Exactly one is ever populated. */
-data class MatchCredentials(val token: String?, val guestId: String?)
+/** Credentials handed to the match socket. Exactly one identity is ever populated. */
+data class MatchCredentials(val token: String?, val guestId: String?, val guestSecret: String?)
 
 /** How close a guest session is to lapsing. */
 enum class ExpiryLevel { SAFE, WARNING, CRITICAL, LAPSED }
@@ -105,9 +105,9 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         get() {
             val token = prefs.sessionToken
             return if (token != null) {
-                MatchCredentials(token = token, guestId = null)
+                MatchCredentials(token = token, guestId = null, guestSecret = null)
             } else {
-                MatchCredentials(token = null, guestId = prefs.guestId)
+                MatchCredentials(token = null, guestId = prefs.guestId, guestSecret = prefs.guestSecret)
             }
         }
 
@@ -196,18 +196,18 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Issues or renews the temporary guest id and starts the keep-alive loop. */
     private suspend fun ensureGuestSession() {
-        val session = api.guestSession(prefs.guestId, prefs.playerName)
+        val session = api.guestSession(prefs.guestId, prefs.guestSecret, prefs.playerName)
         if (session == null) {
             _uiState.update {
                 it.copy(error = "Can't reach the arena. Check your connection.")
             }
             return
         }
-        prefs.guestId = session.guestId
+        val adopted = rememberGuestSession(session)
         _uiState.update {
-            it.copy(identity = Identity.Guest(session), friends = emptyList(), error = null)
+            it.copy(identity = Identity.Guest(adopted), friends = emptyList(), error = null)
         }
-        publishExpiry(session.expiresAt)
+        publishExpiry(adopted.expiresAt)
         // Loops belong to the foreground only; starting them here unconditionally
         // would let a backgrounded app keep the session alive and issue requests.
         if (foreground) {
@@ -236,10 +236,16 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
                 val idleFor = System.currentTimeMillis() - lastActivityAt
                 if (idleFor > ACTIVITY_WINDOW_MS) continue
 
-                val refreshed = api.guestHeartbeat(current.session.guestId)
+                val secret = current.session.guestSecret ?: prefs.guestSecret
+                if (secret == null) {
+                    handleLapse()
+                    return@launch
+                }
+                val refreshed = api.guestHeartbeat(current.session.guestId, secret)
                 if (refreshed != null) {
-                    _uiState.update { it.copy(identity = Identity.Guest(refreshed)) }
-                    publishExpiry(refreshed.expiresAt)
+                    val adopted = rememberGuestSession(refreshed, secret)
+                    _uiState.update { it.copy(identity = Identity.Guest(adopted)) }
+                    publishExpiry(adopted.expiresAt)
                 } else {
                     Log.d(TAG, "Guest id lapsed during heartbeat")
                     handleLapse()
@@ -257,12 +263,18 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         noteActivity()
         val current = _uiState.value.identity as? Identity.Guest ?: return
         viewModelScope.launch {
-            val refreshed = api.guestHeartbeat(current.session.guestId)
+            val secret = current.session.guestSecret ?: prefs.guestSecret
+            if (secret == null) {
+                handleLapse()
+                return@launch
+            }
+            val refreshed = api.guestHeartbeat(current.session.guestId, secret)
             if (refreshed != null) {
+                val adopted = rememberGuestSession(refreshed, secret)
                 _uiState.update {
-                    it.copy(identity = Identity.Guest(refreshed), notice = "Session extended.")
+                    it.copy(identity = Identity.Guest(adopted), notice = "Session extended.")
                 }
-                publishExpiry(refreshed.expiresAt)
+                publishExpiry(adopted.expiresAt)
             } else {
                 handleLapse()
             }
@@ -314,6 +326,7 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
 
         viewModelScope.launch {
             prefs.guestId = null
+            prefs.guestSecret = null
             ensureGuestSession()
             _uiState.update {
                 it.copy(notice = "Guest session expired. You're on a fresh guest id — register to keep your run next time.")
@@ -375,7 +388,8 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
 
         viewModelScope.launch {
             val guestId = (_uiState.value.identity as? Identity.Guest)?.session?.guestId
-            when (val outcome = api.register(username, email, password, guestId, transferGuestStats)) {
+            val guestSecret = (_uiState.value.identity as? Identity.Guest)?.session?.guestSecret ?: prefs.guestSecret
+            when (val outcome = api.register(username, email, password, guestId, guestSecret, transferGuestStats)) {
                 is AuthOutcome.Ok -> {
                     adoptSession(outcome.value)
                     _uiState.update {
@@ -486,6 +500,7 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         prefs.playerName = result.profile.username
         // The guest id is now owned by the server (retired if transferred).
         prefs.guestId = null
+        prefs.guestSecret = null
         _uiState.update {
             it.copy(
                 identity = Identity.Registered(result.profile),
@@ -587,10 +602,16 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
                 }
 
                 is Identity.Guest -> {
-                    val refreshed = api.guestMe(current.session.guestId)
+                    val secret = current.session.guestSecret ?: prefs.guestSecret
+                    if (secret == null) {
+                        handleLapse()
+                        return@launch
+                    }
+                    val refreshed = api.guestMe(current.session.guestId, secret)
                     if (refreshed != null) {
-                        _uiState.update { it.copy(identity = Identity.Guest(refreshed)) }
-                        publishExpiry(refreshed.expiresAt)
+                        val adopted = rememberGuestSession(refreshed, secret)
+                        _uiState.update { it.copy(identity = Identity.Guest(adopted)) }
+                        publishExpiry(adopted.expiresAt)
                     } else {
                         // The id lapsed while we were away — take a fresh one.
                         handleLapse()
@@ -615,10 +636,11 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(identity = Identity.Guest(current.session.copy(displayName = trimmed)))
         }
         viewModelScope.launch {
-            api.guestSession(current.session.guestId, trimmed)?.let { session ->
-                prefs.guestId = session.guestId
-                _uiState.update { it.copy(identity = Identity.Guest(session)) }
-                publishExpiry(session.expiresAt)
+            val secret = current.session.guestSecret ?: prefs.guestSecret
+            api.guestSession(current.session.guestId, secret, trimmed)?.let { session ->
+                val adopted = rememberGuestSession(session, secret)
+                _uiState.update { it.copy(identity = Identity.Guest(adopted)) }
+                publishExpiry(adopted.expiresAt)
             }
         }
     }
@@ -633,5 +655,12 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         presenceJob?.cancel()
         tickerJob?.cancel()
         api.shutdown()
+    }
+
+    private fun rememberGuestSession(session: GuestSession, fallbackSecret: String? = prefs.guestSecret): GuestSession {
+        val secret = session.guestSecret ?: fallbackSecret
+        prefs.guestId = session.guestId
+        prefs.guestSecret = secret
+        return session.copy(guestSecret = secret)
     }
 }

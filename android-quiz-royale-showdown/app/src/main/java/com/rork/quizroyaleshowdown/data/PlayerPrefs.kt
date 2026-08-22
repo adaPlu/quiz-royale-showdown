@@ -60,6 +60,16 @@ class PlayerPrefs(context: Context) {
             }.apply()
         }
 
+    /** Opaque bearer secret for the temporary guest id. */
+    var guestSecret: String?
+        get() = securePrefs?.getString(KEY_GUEST_SECRET, null)?.takeIf { it.isNotBlank() }
+        set(value) {
+            securePrefs?.edit()?.apply {
+                if (value.isNullOrBlank()) remove(KEY_GUEST_SECRET) else putString(KEY_GUEST_SECRET, value)
+            }?.apply()
+            prefs.edit().remove(KEY_GUEST_SECRET).apply()
+        }
+
     /** Offline fallback record, shown before the server stats land. */
     var bestPlacement: Int
         get() = prefs.getInt(KEY_BEST_PLACE, 0)
@@ -113,6 +123,7 @@ class PlayerPrefs(context: Context) {
         const val KEY_NAME = "player_name"
         const val KEY_TOKEN = "session_token"
         const val KEY_GUEST_ID = "guest_id"
+        const val KEY_GUEST_SECRET = "guest_secret"
         const val KEY_BEST_PLACE = "best_placement"
         const val KEY_BEST_SCORE = "best_score"
         const val KEY_WINS = "wins"

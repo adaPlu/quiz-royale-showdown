@@ -17,13 +17,22 @@ import { CATEGORIES, WORLD_BOARD, normalizeBoard } from "./categories.js";
 import { closeCache } from "./cache.js";
 import {
   GUEST_TTL_MS,
+  GOOGLE_PLAY_REVIEW_EMAIL,
+  GOOGLE_PLAY_REVIEW_ROLE,
+  GOOGLE_PLAY_REVIEW_USERNAME,
+  REVIEW_ACCOUNT_BALANCE,
   SESSION_TTL_MS,
+  applyReviewAccountAccess,
   applyOutcome,
   applyRank,
   derivePresence,
   emptyStats,
   mergeStats,
+  normalizeCurrencyBalances,
+  normalizeEntitlements,
   normalizeStats,
+  reviewAccountCurrencyBalances,
+  reviewAccountEntitlements,
   type AuthResultDto,
   type FriendDto,
   type GuestSessionDto,
@@ -32,7 +41,11 @@ import {
   type PlayerStats,
   type PresenceRecord,
   type SubjectKind,
+  type UserEntitlements,
   type UserProfileDto,
+  type UserRole,
+  type VirtualCurrencyBalances,
+  publicLeaderboardSubjectId,
 } from "./identity.js";
 import {
   cachedLeaderboard,
@@ -48,11 +61,14 @@ import {
 const PORT = Number.parseInt(process.env.PORT ?? "8080", 10);
 const PASSWORD_RESET_TTL_MS = 30 * 60 * 1000;
 const MAX_FRIENDS = 200;
+const MAX_JSON_BODY_BYTES = Number.parseInt(process.env.MAX_JSON_BODY_BYTES ?? "1048576", 10);
+const AUTH_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+const AUTH_RATE_LIMIT_MAX = Number.parseInt(process.env.AUTH_RATE_LIMIT_MAX ?? "20", 10);
 
 const CORS: Record<string, string> = {
   "Access-Control-Allow-Origin": process.env.CORS_ORIGIN ?? "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Internal-Token",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Internal-Token, X-Guest-Id, X-Guest-Secret",
 };
 
 type UserRow = {
@@ -61,6 +77,9 @@ type UserRow = {
   username_lower: string;
   email: string;
   password_hash: string;
+  role: UserRole;
+  entitlements: UserEntitlements | null;
+  currency_balances: VirtualCurrencyBalances | null;
   created_at: string | number;
   last_login_at: string | number;
 };
@@ -72,6 +91,7 @@ type GuestRow = {
   created_at: string | number;
   last_seen_at: string | number;
   expires_at: string | number;
+  guest_secret_digest: string | null;
 };
 
 const matchOutcomeSchema = z.object({
@@ -81,10 +101,10 @@ const matchOutcomeSchema = z.object({
   displayName: z.string().min(1),
   won: z.boolean(),
   placement: z.number().int().positive().nullable(),
-  score: z.number().int(),
+  score: z.number().int().nonnegative().max(1_000_000),
   correctAnswers: z.number().int().nonnegative(),
-  powerUpsUsed: z.number().int().nonnegative(),
-  categoryPoints: z.record(z.number().int()),
+  powerUpsUsed: z.number().int().nonnegative().max(100),
+  categoryPoints: z.record(z.number().int().nonnegative().max(1_000_000)),
   recordWinLoss: z.boolean(),
 });
 
@@ -97,18 +117,18 @@ const server = http.createServer(async (request, response) => {
       return send(response, 200, { ok: true, service: "quiz-royale-api", now: Date.now() });
     }
 
-    if (request.method === "POST" && url.pathname === "/auth/register") return sendResponse(response, await register(request));
-    if (request.method === "POST" && url.pathname === "/auth/login") return sendResponse(response, await login(request));
+    if (request.method === "POST" && url.pathname === "/auth/register") return sendResponse(response, await rateLimited(request, "register", () => register(request)));
+    if (request.method === "POST" && url.pathname === "/auth/login") return sendResponse(response, await rateLimited(request, "login", () => login(request)));
     if (request.method === "POST" && url.pathname === "/auth/logout") return sendResponse(response, await logout(request));
-    if (request.method === "POST" && url.pathname === "/auth/forgot-password") return sendResponse(response, await forgotPassword(request));
-    if (request.method === "POST" && url.pathname === "/auth/reset-password") return sendResponse(response, await resetPassword(request));
+    if (request.method === "POST" && url.pathname === "/auth/forgot-password") return sendResponse(response, await rateLimited(request, "forgot-password", () => forgotPassword(request)));
+    if (request.method === "POST" && url.pathname === "/auth/reset-password") return sendResponse(response, await rateLimited(request, "reset-password", () => resetPassword(request)));
     if (request.method === "GET" && url.pathname === "/auth/me") return sendResponse(response, await me(request));
     if (request.method === "GET" && url.pathname === "/auth/resolve") return sendResponse(response, await resolveUser(request));
 
     if (request.method === "POST" && url.pathname === "/guest/session") return sendResponse(response, await guestSession(request));
     if (request.method === "POST" && url.pathname === "/guest/heartbeat") return sendResponse(response, await guestHeartbeat(request));
     if (request.method === "POST" && url.pathname === "/guest/end") return sendResponse(response, await guestEnd(request));
-    if (request.method === "GET" && url.pathname === "/guest/me") return sendResponse(response, await guestMe(url));
+    if (request.method === "GET" && url.pathname === "/guest/me") return sendResponse(response, await guestMe(request, url));
     if (request.method === "GET" && url.pathname === "/internal/guest/resolve") return sendResponse(response, await resolveGuest(request, url));
     if (request.method === "POST" && url.pathname === "/internal/guest/claim") return sendResponse(response, await claimGuest(request));
 
@@ -131,14 +151,25 @@ const server = http.createServer(async (request, response) => {
 
     return send(response, 404, { error: "not_found" });
   } catch (error) {
+    if ((error as { statusCode?: number })?.statusCode === 413) {
+      return send(response, 413, { error: "payload_too_large", message: "Request body is too large." });
+    }
     console.error("request failed", request.method, request.url, (error as Error)?.message);
     return send(response, 500, { error: "internal_error", message: "Something went wrong." });
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`quiz-royale-api listening on ${PORT}`);
+start().catch((error) => {
+  console.error("startup failed", (error as Error)?.message);
+  process.exitCode = 1;
 });
+
+async function start(): Promise<void> {
+  await ensureGooglePlayReviewAccount();
+  server.listen(PORT, () => {
+    console.log(`quiz-royale-api listening on ${PORT}`);
+  });
+}
 
 async function register(request: http.IncomingMessage): Promise<ApiResponse> {
   const body = await safeJson(request);
@@ -156,6 +187,7 @@ async function register(request: http.IncomingMessage): Promise<ApiResponse> {
   const now = Date.now();
   const userId = `u-${crypto.randomUUID()}`;
   const guestId = typeof body.guestId === "string" ? body.guestId : null;
+  const guestSecret = typeof body.guestSecret === "string" ? body.guestSecret : null;
   const transferStats = guestId !== null && body.transferStats === true;
 
   try {
@@ -169,7 +201,7 @@ async function register(request: http.IncomingMessage): Promise<ApiResponse> {
       let stats = emptyStats();
       let transferred = false;
       if (transferStats) {
-        const claimed = await claimGuestInTx(client, guestId);
+        const claimed = await claimGuestInTx(client, guestId, guestSecret);
         if (claimed) {
           stats = mergeStats(stats, claimed);
           transferred = true;
@@ -184,7 +216,18 @@ async function register(request: http.IncomingMessage): Promise<ApiResponse> {
       await syncLeaderboard(client, "USER", userId, username.value, stats, null);
 
       const session = await createSession(client, userId);
-      const profile = await toProfile(client, { user_id: userId, username: username.value, username_lower: username.value.toLowerCase(), email: email.value, password_hash: passwordHash, created_at: now, last_login_at: now });
+      const profile = await toProfile(client, {
+        user_id: userId,
+        username: username.value,
+        username_lower: username.value.toLowerCase(),
+        email: email.value,
+        password_hash: passwordHash,
+        role: "player",
+        entitlements: null,
+        currency_balances: null,
+        created_at: now,
+        last_login_at: now,
+      });
       return { session, profile, transferred };
     });
 
@@ -211,6 +254,10 @@ async function login(request: http.IncomingMessage): Promise<ApiResponse> {
   const password = typeof body.password === "string" ? body.password : "";
   if (!identifier || !password) {
     return [400, { error: "validation_failed", fields: { identifier: "Enter your login details." } }];
+  }
+
+  if (isReviewAccountIdentifier(identifier)) {
+    await ensureGooglePlayReviewAccount();
   }
 
   const record = await findUserByIdentifier(pool, identifier);
@@ -320,18 +367,27 @@ async function resolveUser(request: http.IncomingMessage): Promise<ApiResponse> 
   const record = await authenticate(request);
   if (!record) return [401, { error: "unauthorized" }];
   const stats = await getStats(pool, "USER", record.user_id);
-  return [200, { userId: record.user_id, username: record.username, powerUpCharges: stats.powerUpCharges }];
+  const entitlements = normalizeEntitlements(record.entitlements);
+  return [200, {
+    userId: record.user_id,
+    username: record.username,
+    role: userRole(record),
+    entitlements,
+    currencyBalances: currencyBalancesFor(record),
+    powerUpCharges: entitlements.unlimitedCurrency ? REVIEW_ACCOUNT_BALANCE : stats.powerUpCharges,
+  }];
 }
 
 async function guestSession(request: http.IncomingMessage): Promise<ApiResponse> {
   const body = await safeJson(request);
   const displayName = sanitizeGuestName(body.displayName);
   const existingId = typeof body.guestId === "string" ? body.guestId : null;
+  const existingSecret = typeof body.guestSecret === "string" ? body.guestSecret : null;
 
   const result = await tx(async (client) => {
     if (existingId) {
       const existing = await getGuest(client, existingId, true);
-      if (existing && Number(existing.expires_at) > Date.now()) {
+      if (existing && Number(existing.expires_at) > Date.now() && validGuestSecret(existing, existingSecret)) {
         const now = Date.now();
         const expiresAt = now + GUEST_TTL_MS;
         const name = displayName || existing.display_name;
@@ -348,16 +404,17 @@ async function guestSession(request: http.IncomingMessage): Promise<ApiResponse>
 
     const slot = await takeGuestSlot(client);
     const now = Date.now();
-    const guestId = `g${slot}-${crypto.randomUUID().replace(/-/g, "").slice(0, 6)}`;
+    const guestId = `g${slot}-${crypto.randomUUID().replace(/-/g, "")}`;
+    const guestSecret = mintGuestSecret();
     const name = displayName || `Guest${slot}`;
     const expiresAt = now + GUEST_TTL_MS;
     const stats = emptyStats();
     await client.query(
-      "INSERT INTO guests(guest_id, slot, display_name, created_at, last_seen_at, expires_at) VALUES ($1, $2, $3, $4, $4, $5)",
-      [guestId, slot, name, now, expiresAt],
+      "INSERT INTO guests(guest_id, slot, display_name, created_at, last_seen_at, expires_at, guest_secret_digest) VALUES ($1, $2, $3, $4, $4, $5, $6)",
+      [guestId, slot, name, now, expiresAt, sha256Hex(guestSecret)],
     );
     await putStats(client, "GUEST", guestId, name, stats, expiresAt);
-    return { session: toGuestDto({ guest_id: guestId, slot, display_name: name, created_at: now, last_seen_at: now, expires_at: expiresAt }, stats), reused: false };
+    return { session: toGuestDto({ guest_id: guestId, slot, display_name: name, created_at: now, last_seen_at: now, expires_at: expiresAt, guest_secret_digest: sha256Hex(guestSecret) }, stats, guestSecret), reused: false };
   });
   return [result.reused ? 200 : 201, { guest: result.session, reused: result.reused }];
 }
@@ -365,9 +422,11 @@ async function guestSession(request: http.IncomingMessage): Promise<ApiResponse>
 async function guestHeartbeat(request: http.IncomingMessage): Promise<ApiResponse> {
   const body = await safeJson(request);
   const guestId = typeof body.guestId === "string" ? body.guestId : "";
+  const guestSecret = typeof body.guestSecret === "string" ? body.guestSecret : "";
   const result = await tx(async (client) => {
     const guest = await getGuest(client, guestId, true);
     if (!guest || Number(guest.expires_at) <= Date.now()) return null;
+    if (!validGuestSecret(guest, guestSecret)) return "unauthorized" as const;
     const now = Date.now();
     const expiresAt = now + GUEST_TTL_MS;
     await client.query("UPDATE guests SET last_seen_at = $2, expires_at = $3 WHERE guest_id = $1", [guestId, now, expiresAt]);
@@ -376,6 +435,7 @@ async function guestHeartbeat(request: http.IncomingMessage): Promise<ApiRespons
     await syncLeaderboard(client, "GUEST", guestId, guest.display_name, stats, expiresAt);
     return toGuestDto({ ...guest, last_seen_at: now, expires_at: expiresAt }, stats);
   });
+  if (result === "unauthorized") return [401, { error: "unauthorized" }];
   if (!result) return [404, { error: "guest_expired", message: "This guest session has expired." }];
   return [200, { guest: result }];
 }
@@ -383,23 +443,34 @@ async function guestHeartbeat(request: http.IncomingMessage): Promise<ApiRespons
 async function guestEnd(request: http.IncomingMessage): Promise<ApiResponse> {
   const body = await safeJson(request);
   const guestId = typeof body.guestId === "string" ? body.guestId : "";
-  const retired = await tx(async (client) => retireGuest(client, guestId));
+  const guestSecret = typeof body.guestSecret === "string" ? body.guestSecret : "";
+  const retired = await tx(async (client) => {
+    const guest = await getGuest(client, guestId, true);
+    if (!guest) return false;
+    if (!validGuestSecret(guest, guestSecret)) return "unauthorized" as const;
+    return retireGuest(client, guestId);
+  });
+  if (retired === "unauthorized") return [401, { error: "unauthorized" }];
   return [200, { ok: true, retired }];
 }
 
-async function guestMe(url: URL): Promise<ApiResponse> {
-  const guestId = url.searchParams.get("guestId") ?? "";
+async function guestMe(request: http.IncomingMessage, url: URL): Promise<ApiResponse> {
+  const guestId = headerValue(request, "x-guest-id");
+  const guestSecret = headerValue(request, "x-guest-secret");
   const guest = await getGuest(pool, guestId);
   if (!guest || Number(guest.expires_at) <= Date.now()) return [404, { error: "guest_expired" }];
+  if (!validGuestSecret(guest, guestSecret)) return [401, { error: "unauthorized" }];
   return [200, { guest: toGuestDto(guest, await getStats(pool, "GUEST", guestId)) }];
 }
 
 async function resolveGuest(request: http.IncomingMessage, url: URL): Promise<ApiResponse> {
   if (!authorizedInternal(request)) return [401, { error: "unauthorized" }];
-  const guestId = url.searchParams.get("guestId") ?? "";
+  const guestId = headerValue(request, "x-guest-id");
+  const guestSecret = headerValue(request, "x-guest-secret");
   const result = await tx(async (client) => {
     const guest = await getGuest(client, guestId, true);
     if (!guest || Number(guest.expires_at) <= Date.now()) return null;
+    if (!validGuestSecret(guest, guestSecret)) return "unauthorized" as const;
     const now = Date.now();
     const expiresAt = now + GUEST_TTL_MS;
     await client.query("UPDATE guests SET last_seen_at = $2, expires_at = $3 WHERE guest_id = $1", [guestId, now, expiresAt]);
@@ -408,6 +479,7 @@ async function resolveGuest(request: http.IncomingMessage, url: URL): Promise<Ap
     await syncLeaderboard(client, "GUEST", guestId, guest.display_name, stats, expiresAt);
     return { guestId, displayName: guest.display_name, powerUpCharges: stats.powerUpCharges };
   });
+  if (result === "unauthorized") return [401, { error: "unauthorized" }];
   if (!result) return [404, { error: "guest_expired" }];
   return [200, result];
 }
@@ -416,7 +488,8 @@ async function claimGuest(request: http.IncomingMessage): Promise<ApiResponse> {
   if (!authorizedInternal(request)) return [401, { error: "unauthorized" }];
   const body = await safeJson(request);
   const guestId = typeof body.guestId === "string" ? body.guestId : "";
-  const stats = await tx(async (client) => claimGuestInTx(client, guestId));
+  const guestSecret = typeof body.guestSecret === "string" ? body.guestSecret : "";
+  const stats = await tx(async (client) => claimGuestInTx(client, guestId, guestSecret));
   return [200, { ok: Boolean(stats), stats }];
 }
 
@@ -508,13 +581,19 @@ async function internalPresence(request: http.IncomingMessage): Promise<ApiRespo
 async function powerups(request: http.IncomingMessage, url: URL): Promise<ApiResponse> {
   const record = await authenticate(request);
   if (record) {
-    return [200, { inventory: await getPowerupInventory(pool, "USER", record.user_id) }];
+    const inventory = await getPowerupInventory(pool, "USER", record.user_id);
+    if (normalizeEntitlements(record.entitlements).unlimitedCurrency) {
+      inventory.POWERUP_CHARGE = REVIEW_ACCOUNT_BALANCE;
+    }
+    return [200, { inventory }];
   }
 
-  const guestId = url.searchParams.get("guestId") ?? "";
+  const guestId = headerValue(request, "x-guest-id");
+  const guestSecret = headerValue(request, "x-guest-secret");
   if (!guestId) return [401, { error: "unauthorized" }];
   const guest = await getGuest(pool, guestId);
   if (!guest || Number(guest.expires_at) <= Date.now()) return [404, { error: "guest_expired" }];
+  if (!validGuestSecret(guest, guestSecret)) return [401, { error: "unauthorized" }];
   return [200, { inventory: await getPowerupInventory(pool, "GUEST", guestId) }];
 }
 
@@ -576,7 +655,7 @@ async function leaderboard(url: URL): Promise<ApiResponse> {
     entries: rows.rows.map((row) => ({
       rank: Number(row.rank),
       subjectKind: row.subject_kind,
-      subjectId: row.subject_id,
+      subjectId: publicLeaderboardSubjectId(row.subject_kind, row.subject_id),
       displayName: row.display_name,
       points: Number(row.points),
       wins: row.wins,
@@ -714,13 +793,19 @@ async function createSession(client: DbClient, userId: string): Promise<{ token:
 }
 
 async function toProfile(db: DbClient, record: UserRow): Promise<UserProfileDto> {
+  const entitlements = normalizeEntitlements(record.entitlements);
   return {
     kind: "USER",
     userId: record.user_id,
     username: record.username,
     email: record.email,
+    role: userRole(record),
+    entitlements,
+    currencyBalances: currencyBalancesFor(record),
     createdAt: Number(record.created_at),
-    stats: await getStats(db, "USER", record.user_id),
+    stats: entitlements.unlimitedCurrency
+      ? applyReviewAccountAccess(await getStats(db, "USER", record.user_id))
+      : await getStats(db, "USER", record.user_id),
     friends: await hydrateFriends(db, record.user_id),
   };
 }
@@ -829,6 +914,106 @@ async function syncPowerupInventory(
   );
 }
 
+async function ensureGooglePlayReviewAccount(): Promise<UserRow> {
+  const email = (process.env.GOOGLE_PLAY_REVIEW_EMAIL ?? GOOGLE_PLAY_REVIEW_EMAIL).trim().toLowerCase();
+  const username = (process.env.GOOGLE_PLAY_REVIEW_USERNAME ?? GOOGLE_PLAY_REVIEW_USERNAME).trim();
+  const password = process.env.GOOGLE_PLAY_REVIEW_PASSWORD ?? "Test?Test.";
+  const passwordHash = await hashPassword(password);
+  const entitlements = reviewAccountEntitlements();
+  const currencyBalances = reviewAccountCurrencyBalances();
+  const now = Date.now();
+
+  return await tx(async (client) => {
+    const existing = await findUserByIdentifier(client, email);
+    if (existing) {
+      const stats = applyReviewAccountAccess(await getStats(client, "USER", existing.user_id));
+      await client.query(
+        `UPDATE users
+         SET role = $2, entitlements = $3, currency_balances = $4,
+             password_hash = $5, last_login_at = GREATEST(last_login_at, $6)
+         WHERE user_id = $1`,
+        [
+          existing.user_id,
+          GOOGLE_PLAY_REVIEW_ROLE,
+          JSON.stringify(entitlements),
+          JSON.stringify(currencyBalances),
+          passwordHash,
+          now,
+        ],
+      );
+      await putStats(client, "USER", existing.user_id, existing.username, stats, null);
+      await syncLeaderboard(client, "USER", existing.user_id, existing.username, stats, null);
+      return {
+        ...existing,
+        role: GOOGLE_PLAY_REVIEW_ROLE,
+        entitlements,
+        currency_balances: currencyBalances,
+        password_hash: passwordHash,
+        last_login_at: Math.max(Number(existing.last_login_at), now),
+      };
+    }
+
+    const selected = await availableReviewUsername(client, username);
+    const userId = `u-${crypto.randomUUID()}`;
+    await client.query(
+      `INSERT INTO users(user_id, username, username_lower, email, password_hash, role, entitlements, currency_balances, created_at, last_login_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)`,
+      [
+        userId,
+        selected.username,
+        selected.usernameLower,
+        email,
+        passwordHash,
+        GOOGLE_PLAY_REVIEW_ROLE,
+        JSON.stringify(entitlements),
+        JSON.stringify(currencyBalances),
+        now,
+      ],
+    );
+    const stats = applyReviewAccountAccess(emptyStats());
+    await putStats(client, "USER", userId, selected.username, stats, null);
+    await syncLeaderboard(client, "USER", userId, selected.username, stats, null);
+    return {
+      user_id: userId,
+      username: selected.username,
+      username_lower: selected.usernameLower,
+      email,
+      password_hash: passwordHash,
+      role: GOOGLE_PLAY_REVIEW_ROLE,
+      entitlements,
+      currency_balances: currencyBalances,
+      created_at: now,
+      last_login_at: now,
+    };
+  });
+}
+
+async function availableReviewUsername(db: DbClient, preferredUsername: string): Promise<{ username: string; usernameLower: string }> {
+  for (const username of [preferredUsername, "play_reviewer"]) {
+    const usernameLower = username.toLowerCase();
+    const existing = await db.query<{ user_id: string }>("SELECT user_id FROM users WHERE username_lower = $1", [usernameLower]);
+    if (!existing.rows[0]) return { username, usernameLower };
+  }
+  const username = `review_${crypto.randomUUID().slice(0, 8)}`;
+  return { username, usernameLower: username.toLowerCase() };
+}
+
+function isReviewAccountIdentifier(identifier: string): boolean {
+  const normalized = identifier.trim().toLowerCase();
+  return normalized === (process.env.GOOGLE_PLAY_REVIEW_EMAIL ?? GOOGLE_PLAY_REVIEW_EMAIL).toLowerCase()
+    || normalized === (process.env.GOOGLE_PLAY_REVIEW_USERNAME ?? GOOGLE_PLAY_REVIEW_USERNAME).toLowerCase();
+}
+
+function userRole(record: UserRow): UserRole {
+  return record.role === GOOGLE_PLAY_REVIEW_ROLE ? GOOGLE_PLAY_REVIEW_ROLE : "player";
+}
+
+function currencyBalancesFor(record: UserRow): VirtualCurrencyBalances {
+  return normalizeEntitlements(record.entitlements).unlimitedCurrency
+    ? reviewAccountCurrencyBalances()
+    : normalizeCurrencyBalances(record.currency_balances);
+}
+
 async function syncLeaderboard(
   db: DbClient,
   subjectKind: SubjectKind,
@@ -873,10 +1058,11 @@ async function getGuest(db: DbClient, guestId: string, forUpdate = false): Promi
   return result.rows[0] ?? null;
 }
 
-function toGuestDto(row: GuestRow, stats: PlayerStats): GuestSessionDto {
+function toGuestDto(row: GuestRow, stats: PlayerStats, guestSecret?: string): GuestSessionDto {
   return {
     kind: "GUEST",
     guestId: row.guest_id,
+    ...(guestSecret ? { guestSecret } : {}),
     displayName: row.display_name,
     expiresAt: Number(row.expires_at),
     stats: normalizeStats(stats),
@@ -907,10 +1093,11 @@ async function retireGuest(client: DbClient, guestId: string): Promise<boolean> 
   return true;
 }
 
-async function claimGuestInTx(client: DbClient, guestId: string | null): Promise<PlayerStats | null> {
-  if (!guestId) return null;
+async function claimGuestInTx(client: DbClient, guestId: string | null, guestSecret: string | null): Promise<PlayerStats | null> {
+  if (!guestId || !guestSecret) return null;
   const guest = await getGuest(client, guestId, true);
   if (!guest || Number(guest.expires_at) <= Date.now()) return null;
+  if (!validGuestSecret(guest, guestSecret)) return null;
   const stats = await getStats(client, "GUEST", guestId);
   await retireGuest(client, guestId);
   return stats;
@@ -957,7 +1144,7 @@ async function sendPasswordResetEmail(record: UserRow, token: string): Promise<v
   ].join("\n");
   const endpoint = process.env.PASSWORD_RESET_EMAIL_ENDPOINT;
   if (!endpoint) {
-    console.info("Password reset email not configured; reset link:", link);
+    console.info("Password reset email not configured; reset token suppressed", record.user_id);
     return;
   }
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -988,9 +1175,63 @@ function bearer(request: http.IncomingMessage): string | null {
   return token || null;
 }
 
+function headerValue(request: http.IncomingMessage, name: string): string {
+  const raw = request.headers[name];
+  return typeof raw === "string" ? raw.trim() : "";
+}
+
+async function rateLimited(
+  request: http.IncomingMessage,
+  action: string,
+  next: () => Promise<ApiResponse>,
+): Promise<ApiResponse> {
+  const key = `${action}:${clientAddress(request)}`;
+  const now = Date.now();
+  const resetAt = now + AUTH_RATE_LIMIT_WINDOW_MS;
+  const result = await pool.query<{ count: number; reset_at: string | number }>(
+    `INSERT INTO auth_rate_limits(rate_key, count, reset_at, updated_at)
+     VALUES ($1, 1, $2, $3)
+     ON CONFLICT (rate_key)
+     DO UPDATE SET
+       count = CASE
+         WHEN auth_rate_limits.reset_at <= $3 THEN 1
+         ELSE auth_rate_limits.count + 1
+       END,
+       reset_at = CASE
+         WHEN auth_rate_limits.reset_at <= $3 THEN $2
+         ELSE auth_rate_limits.reset_at
+       END,
+       updated_at = $3
+     RETURNING count, reset_at`,
+    [key, resetAt, now],
+  );
+  const row = result.rows[0];
+  if (row && Number(row.count) > AUTH_RATE_LIMIT_MAX) {
+    return [429, { error: "rate_limited", message: "Too many attempts. Try again later." }];
+  }
+  if (Math.random() < 0.01) {
+    await pool.query("DELETE FROM auth_rate_limits WHERE reset_at <= $1", [now]).catch(() => undefined);
+  }
+  return next();
+}
+
+function clientAddress(request: http.IncomingMessage): string {
+  const forwarded = process.env.TRUST_PROXY === "true" ? request.headers["x-forwarded-for"] : undefined;
+  if (typeof forwarded === "string" && forwarded.trim()) return forwarded.split(",")[0]!.trim();
+  return request.socket.remoteAddress ?? "unknown";
+}
+
 async function safeJson(request: http.IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
-  for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  let total = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buffer.byteLength;
+    if (total > MAX_JSON_BODY_BYTES) {
+      throw Object.assign(new Error("request body too large"), { statusCode: 413 });
+    }
+    chunks.push(buffer);
+  }
   if (chunks.length === 0) return {};
   try {
     const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -998,6 +1239,15 @@ async function safeJson(request: http.IncomingMessage): Promise<Record<string, u
   } catch {
     return {};
   }
+}
+
+function mintGuestSecret(): string {
+  return `${crypto.randomUUID().replace(/-/g, "")}${crypto.randomUUID().replace(/-/g, "")}`;
+}
+
+function validGuestSecret(guest: GuestRow, guestSecret: string | null): boolean {
+  if (!guestSecret || !guest.guest_secret_digest) return false;
+  return sha256Hex(guestSecret) === guest.guest_secret_digest;
 }
 
 type ApiResponse = [number, unknown];

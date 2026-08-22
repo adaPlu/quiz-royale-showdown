@@ -1,7 +1,11 @@
 // functions/do-dispatch.ts — one place that knows how to address a Durable
 // Object on this platform, so callers never hand-roll the routing headers.
 
-export type DoFetcher = Fetcher;
+export type DoFetcher = Fetcher & {
+  setAlarm?(className: string, id: string, scheduledTime: number | Date): Promise<void>;
+  getAlarm?(className: string, id: string): Promise<number | null>;
+  deleteAlarm?(className: string, id: string): Promise<void>;
+};
 
 export type DoEnv = {
   DO: DoFetcher;
@@ -9,6 +13,9 @@ export type DoEnv = {
   PASSWORD_RESET_EMAIL_ENDPOINT?: string;
   PASSWORD_RESET_EMAIL_TOKEN?: string;
   PASSWORD_RESET_FROM?: string;
+  GOOGLE_PLAY_REVIEW_EMAIL?: string;
+  GOOGLE_PLAY_REVIEW_USERNAME?: string;
+  GOOGLE_PLAY_REVIEW_PASSWORD?: string;
   RAILWAY_API_URL?: string;
   RAILWAY_INTERNAL_TOKEN?: string;
   ALLOW_STATIC_QUESTIONS_FALLBACK?: string;

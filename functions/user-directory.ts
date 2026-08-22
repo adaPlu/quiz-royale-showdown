@@ -26,19 +26,31 @@ import {
   type FieldErrors,
 } from "./auth-core";
 import {
+  GOOGLE_PLAY_REVIEW_EMAIL,
+  GOOGLE_PLAY_REVIEW_ROLE,
+  GOOGLE_PLAY_REVIEW_USERNAME,
+  REVIEW_ACCOUNT_BALANCE,
+  applyReviewAccountAccess,
   applyOutcome,
   applyRank,
   derivePresence,
   emptyStats,
   mergeStats,
+  normalizeCurrencyBalances,
+  normalizeEntitlements,
   normalizeStats,
+  reviewAccountCurrencyBalances,
+  reviewAccountEntitlements,
   SESSION_TTL_MS,
   type AuthResultDto,
   type FriendDto,
   type MatchOutcome,
   type PlayerStats,
   type PresenceRecord,
+  type UserEntitlements,
   type UserProfileDto,
+  type UserRole,
+  type VirtualCurrencyBalances,
 } from "./identity";
 import { callDo, callDoJson, GUEST_REGISTRY_ID, LEADERBOARD_ID, type DoEnv } from "./do-dispatch";
 
@@ -48,6 +60,9 @@ type UserRecord = {
   usernameLower: string;
   email: string;
   passwordHash: string;
+  role?: UserRole;
+  entitlements?: UserEntitlements;
+  currencyBalances?: VirtualCurrencyBalances;
   createdAt: number;
   lastLoginAt: number;
   stats: PlayerStats;
@@ -77,11 +92,15 @@ function presenceKey(userId: string): string {
 }
 
 export class UserDirectory extends DurableObject<DoEnv> {
+  private reviewAccountSeeded = false;
+
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
     try {
+      if (!this.reviewAccountSeeded) await this.ensureGooglePlayReviewAccount();
+
       switch (`${request.method} ${path}`) {
         case "POST /auth/register":
           return await this.register(request);
@@ -191,13 +210,14 @@ export class UserDirectory extends DurableObject<DoEnv> {
     // the registry, so the same session can never be transferred twice.
     let transferred = false;
     const guestId = typeof body.guestId === "string" ? body.guestId : null;
+    const guestSecret = typeof body.guestSecret === "string" ? body.guestSecret : null;
     if (guestId && body.transferStats === true) {
       const claimed = await callDoJson<{ ok: boolean; stats: PlayerStats | null }>(
         this.env,
         "GuestRegistry",
         GUEST_REGISTRY_ID,
         "/internal/guest/claim",
-        { method: "POST", body: { guestId } },
+        { method: "POST", body: { guestId, guestSecret } },
       );
       if (claimed?.ok && claimed.stats) {
         claim.record.stats = mergeStats(claim.record.stats, claimed.stats);
@@ -229,6 +249,10 @@ export class UserDirectory extends DurableObject<DoEnv> {
 
     if (!identifier || !password) {
       return json({ error: "validation_failed", fields: { identifier: "Enter your login details." } }, 400);
+    }
+
+    if (this.isReviewAccountIdentifier(identifier)) {
+      await this.ensureGooglePlayReviewAccount({ forcePasswordRefresh: true });
     }
 
     // Accept either username or email at the same field.
@@ -367,7 +391,12 @@ export class UserDirectory extends DurableObject<DoEnv> {
     return json({
       userId: record.userId,
       username: record.username,
-      powerUpCharges: record.stats.powerUpCharges,
+      role: this.roleFor(record),
+      entitlements: normalizeEntitlements(record.entitlements),
+      currencyBalances: this.currencyBalancesFor(record),
+      powerUpCharges: normalizeEntitlements(record.entitlements).unlimitedCurrency
+        ? REVIEW_ACCOUNT_BALANCE
+        : record.stats.powerUpCharges,
     });
   }
 
@@ -522,18 +551,28 @@ export class UserDirectory extends DurableObject<DoEnv> {
     const outcome = body.outcome;
     if (!outcome || outcome.subjectKind !== "USER") return json({ error: "bad_request" }, 400);
 
+    const reportKey = `report:${outcome.matchId}:${outcome.subjectKind}:${outcome.subjectId}`;
+    if (await this.ctx.storage.get(reportKey)) {
+      return json({ ok: true, duplicate: true, stats: null });
+    }
+
     const record = await this.ctx.storage.get<UserRecord>(`user:${outcome.subjectId}`);
     if (!record) return json({ error: "not_found" }, 404);
 
-    record.stats = applyOutcome(record.stats, outcome);
+    record.stats = this.hasUnlimitedCurrency(record)
+      ? applyReviewAccountAccess(applyOutcome(record.stats, outcome))
+      : applyOutcome(record.stats, outcome);
 
     // Sync first so the rank we read back reflects the points just earned, then
     // fold that rank in as a possible new personal best.
     const worldRank = await this.syncLeaderboard(record);
     record.stats = applyRank(record.stats, worldRank);
-    await this.ctx.storage.put(`user:${record.userId}`, record);
+    await this.ctx.storage.put({
+      [`user:${record.userId}`]: record,
+      [reportKey]: Date.now(),
+    });
 
-    return json({ ok: true, stats: record.stats });
+    return json({ ok: true, duplicate: false, stats: record.stats });
   }
 
   // ------------------------------------------------------------------ helpers
@@ -574,6 +613,62 @@ export class UserDirectory extends DurableObject<DoEnv> {
     return { token, expiresAt };
   }
 
+  private async ensureGooglePlayReviewAccount(options: { forcePasswordRefresh?: boolean } = {}): Promise<void> {
+    if (this.reviewAccountSeeded && !options.forcePasswordRefresh) return;
+
+    const email = (this.env.GOOGLE_PLAY_REVIEW_EMAIL ?? GOOGLE_PLAY_REVIEW_EMAIL).trim().toLowerCase();
+    const username = (this.env.GOOGLE_PLAY_REVIEW_USERNAME ?? GOOGLE_PLAY_REVIEW_USERNAME).trim();
+    const passwordHash = await hashPassword(this.env.GOOGLE_PLAY_REVIEW_PASSWORD ?? "Test?Test.");
+    const entitlements = reviewAccountEntitlements();
+    const currencyBalances = reviewAccountCurrencyBalances();
+    const now = Date.now();
+
+    await this.ctx.blockConcurrencyWhile(async () => {
+      const existingUserId = await this.ctx.storage.get<string>(`email:${email}`);
+      const existing = existingUserId
+        ? await this.ctx.storage.get<UserRecord>(`user:${existingUserId}`)
+        : null;
+
+      if (existing) {
+        existing.role = GOOGLE_PLAY_REVIEW_ROLE;
+        existing.entitlements = entitlements;
+        existing.currencyBalances = currencyBalances;
+        existing.passwordHash = passwordHash;
+        existing.stats = applyReviewAccountAccess(existing.stats);
+        existing.lastLoginAt = Math.max(existing.lastLoginAt, now);
+        await this.ctx.storage.put(`user:${existing.userId}`, existing);
+        await this.syncLeaderboard(existing);
+        return;
+      }
+
+      const selected = await this.availableReviewUsername(username);
+      const userId = `u-${crypto.randomUUID()}`;
+      const record: UserRecord = {
+        userId,
+        username: selected.username,
+        usernameLower: selected.usernameLower,
+        email,
+        passwordHash,
+        role: GOOGLE_PLAY_REVIEW_ROLE,
+        entitlements,
+        currencyBalances,
+        createdAt: now,
+        lastLoginAt: now,
+        stats: applyReviewAccountAccess(emptyStats()),
+        friends: [],
+      };
+
+      await this.ctx.storage.put({
+        [`user:${userId}`]: record,
+        [`uname:${selected.usernameLower}`]: userId,
+        [`email:${email}`]: userId,
+      });
+      await this.syncLeaderboard(record);
+    });
+
+    this.reviewAccountSeeded = true;
+  }
+
   private async revokeUserSessions(userId: string): Promise<void> {
     const sessions = await this.ctx.storage.list<SessionRecord>({ prefix: "sess:", limit: 1_000 });
     const deletes: string[] = [];
@@ -598,7 +693,7 @@ export class UserDirectory extends DurableObject<DoEnv> {
 
     const endpoint = this.env.PASSWORD_RESET_EMAIL_ENDPOINT;
     if (!endpoint) {
-      console.info("Password reset email not configured; reset link:", link);
+      console.info("Password reset email not configured; reset token suppressed", record.userId);
       return;
     }
 
@@ -666,15 +761,50 @@ export class UserDirectory extends DurableObject<DoEnv> {
   }
 
   private async toProfile(record: UserRecord): Promise<UserProfileDto> {
+    const entitlements = normalizeEntitlements(record.entitlements);
     return {
       kind: "USER",
       userId: record.userId,
       username: record.username,
       email: record.email,
+      role: this.roleFor(record),
+      entitlements,
+      currencyBalances: this.currencyBalancesFor(record),
       createdAt: record.createdAt,
-      stats: normalizeStats(record.stats),
+      stats: entitlements.unlimitedCurrency
+        ? applyReviewAccountAccess(record.stats)
+        : normalizeStats(record.stats),
       friends: await this.hydrateFriends(record),
     };
+  }
+
+  private isReviewAccountIdentifier(identifier: string): boolean {
+    const normalized = identifier.trim().toLowerCase();
+    return normalized === (this.env.GOOGLE_PLAY_REVIEW_EMAIL ?? GOOGLE_PLAY_REVIEW_EMAIL).toLowerCase()
+      || normalized === (this.env.GOOGLE_PLAY_REVIEW_USERNAME ?? GOOGLE_PLAY_REVIEW_USERNAME).toLowerCase();
+  }
+
+  private roleFor(record: UserRecord): UserRole {
+    return record.role === GOOGLE_PLAY_REVIEW_ROLE ? GOOGLE_PLAY_REVIEW_ROLE : "player";
+  }
+
+  private hasUnlimitedCurrency(record: UserRecord): boolean {
+    return normalizeEntitlements(record.entitlements).unlimitedCurrency;
+  }
+
+  private currencyBalancesFor(record: UserRecord): VirtualCurrencyBalances {
+    return this.hasUnlimitedCurrency(record)
+      ? reviewAccountCurrencyBalances()
+      : normalizeCurrencyBalances(record.currencyBalances);
+  }
+
+  private async availableReviewUsername(preferredUsername: string): Promise<{ username: string; usernameLower: string }> {
+    for (const username of [preferredUsername, "play_reviewer"]) {
+      const usernameLower = username.toLowerCase();
+      if (!(await this.ctx.storage.get<string>(`uname:${usernameLower}`))) return { username, usernameLower };
+    }
+    const username = `review_${crypto.randomUUID().slice(0, 8)}`;
+    return { username, usernameLower: username.toLowerCase() };
   }
 
   /** Upserts the board row and returns the world rank it produced, if any. */

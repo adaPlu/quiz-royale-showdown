@@ -3,7 +3,7 @@
 // Routes:
 //   GET  /health                              liveness probe
 //   GET  /matchmake?mode=QUICK                returns { roomId } to connect to
-//   WS   /match/<roomId>?token|guestId&mode   the authoritative match socket
+//   WS   /match/<roomId>?mode                 the authoritative match socket
 //
 //   POST /auth/register                       create a registered account
 //   POST /auth/login                          exchange credentials for a token
@@ -17,7 +17,7 @@
 //   POST /guest/session                       issue or renew a temporary guest id
 //   POST /guest/heartbeat                     keep a guest id alive
 //   POST /guest/end                           retire a guest id immediately
-//   GET  /guest/me?guestId=                   read a guest's session stats
+//   GET  /guest/me                            read a guest's session stats
 //
 //   GET  /leaderboard?board=WORLD|<category>  ranked board (guests + users)
 //   GET  /leaderboard/boards                  the list of available boards
@@ -54,7 +54,7 @@ type Env = DoEnv;
 const CORS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Guest-Id, X-Guest-Secret",
 };
 
 /** Path -> DO class routing table for the plain-HTTP endpoints. */
@@ -138,6 +138,7 @@ type ResolvedIdentity = {
   kind: SubjectKind;
   subjectId: string;
   displayName: string;
+  powerUpCharges: number;
 };
 
 async function handleMatchSocket(
@@ -146,7 +147,7 @@ async function handleMatchSocket(
   url: URL,
   roomId: string,
 ): Promise<Response> {
-  const identity = await resolveIdentity(env, url);
+  const identity = await resolveIdentity(env, request, url);
   if (!identity) {
     return new Response("unable to establish an identity for this match", {
       status: 401,
@@ -162,6 +163,7 @@ async function handleMatchSocket(
   target.searchParams.set("name", identity.displayName);
   target.searchParams.set("kind", identity.kind);
   target.searchParams.set("mode", parseMode(url.searchParams.get("mode")));
+  target.searchParams.set("powerUpCharges", String(identity.powerUpCharges));
 
   // 2-arg form: the 1-arg form silently drops the Upgrade header.
   return dispatchToDo(env, "MatchRoom", roomId, new Request(target.toString(), request));
@@ -175,16 +177,16 @@ async function handleMatchSocket(
  * usable credential is present we mint a fresh guest rather than refusing —
  * playing without registering must never fail.
  */
-async function resolveIdentity(env: Env, url: URL): Promise<ResolvedIdentity | null> {
-  const token = url.searchParams.get("token");
+async function resolveIdentity(env: Env, request: Request, url: URL): Promise<ResolvedIdentity | null> {
+  const token = bearer(request);
   if (token) {
-    const railway = await callRailwayJson<{ userId: string; username: string }>(
+    const railway = await callRailwayJson<{ userId: string; username: string; powerUpCharges: number }>(
       env,
       "/auth/resolve",
       { token },
     );
     if (railway) {
-      return { kind: "USER", subjectId: railway.userId, displayName: railway.username };
+      return { kind: "USER", subjectId: railway.userId, displayName: railway.username, powerUpCharges: railway.powerUpCharges };
     }
 
     const resolved = await dispatchToDo(
@@ -197,34 +199,36 @@ async function resolveIdentity(env: Env, url: URL): Promise<ResolvedIdentity | n
     ).catch(() => null);
 
     if (resolved?.ok) {
-      const body = (await resolved.json()) as { userId: string; username: string };
-      return { kind: "USER", subjectId: body.userId, displayName: body.username };
+      const body = (await resolved.json()) as { userId: string; username: string; powerUpCharges?: number };
+      return { kind: "USER", subjectId: body.userId, displayName: body.username, powerUpCharges: body.powerUpCharges ?? 0 };
     }
     // Token was rejected: fall through to guest so a lapsed session still plays.
   }
 
-  const guestId = url.searchParams.get("guestId");
+  const guestId = request.headers.get("X-Guest-Id")?.trim() ?? "";
+  const guestSecret = request.headers.get("X-Guest-Secret")?.trim() ?? "";
   if (guestId) {
-    const railway = await callRailwayJson<{ guestId: string; displayName: string }>(
+    const railway = await callRailwayJson<{ guestId: string; displayName: string; powerUpCharges: number }>(
       env,
-      `/internal/guest/resolve?guestId=${encodeURIComponent(guestId)}`,
+      "/internal/guest/resolve",
+      { headers: { "X-Guest-Id": guestId, "X-Guest-Secret": guestSecret } },
     );
     if (railway) {
-      return { kind: "GUEST", subjectId: railway.guestId, displayName: railway.displayName };
+      return { kind: "GUEST", subjectId: railway.guestId, displayName: railway.displayName, powerUpCharges: railway.powerUpCharges };
     }
 
     const resolved = await dispatchToDo(
       env,
       "GuestRegistry",
       GUEST_REGISTRY_ID,
-      new Request(
-        `https://do.internal/internal/guest/resolve?guestId=${encodeURIComponent(guestId)}`,
-      ),
+      new Request("https://do.internal/internal/guest/resolve", {
+        headers: { "X-Guest-Id": guestId, "X-Guest-Secret": guestSecret },
+      }),
     ).catch(() => null);
 
     if (resolved?.ok) {
-      const body = (await resolved.json()) as { guestId: string; displayName: string };
-      return { kind: "GUEST", subjectId: body.guestId, displayName: body.displayName };
+      const body = (await resolved.json()) as { guestId: string; displayName: string; powerUpCharges?: number };
+      return { kind: "GUEST", subjectId: body.guestId, displayName: body.displayName, powerUpCharges: body.powerUpCharges ?? 0 };
     }
   }
 
@@ -242,6 +246,7 @@ async function resolveIdentity(env: Env, url: URL): Promise<ResolvedIdentity | n
       kind: "GUEST",
       subjectId: railwayGuest.guest.guestId,
       displayName: railwayGuest.guest.displayName,
+      powerUpCharges: railwayGuest.guest.stats.powerUpCharges,
     };
   }
 
@@ -262,6 +267,7 @@ async function resolveIdentity(env: Env, url: URL): Promise<ResolvedIdentity | n
     kind: "GUEST",
     subjectId: body.guest.guestId,
     displayName: body.guest.displayName,
+    powerUpCharges: body.guest.stats.powerUpCharges,
   };
 }
 
@@ -303,4 +309,10 @@ function parseMode(raw: string | null): GameMode {
 
 function sanitizeRoomToken(raw: string): string {
   return raw.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "solo";
+}
+
+function bearer(request: Request): string | null {
+  const header = request.headers.get("Authorization");
+  if (!header?.startsWith("Bearer ")) return null;
+  return header.slice(7).trim() || null;
 }

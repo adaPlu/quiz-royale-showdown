@@ -29,6 +29,7 @@ import {
   type MatchOutcome,
   type PlayerStats,
 } from "./identity";
+import { mintSessionToken, sha256Hex } from "./auth-core";
 import { callDo, callDoJson, LEADERBOARD_ID, type DoEnv } from "./do-dispatch";
 
 /**
@@ -42,6 +43,7 @@ type GuestSession = {
   createdAt: number;
   lastSeenAt: number;
   expiresAt: number;
+  guestSecretHash: string;
   /** Temporary counters. These die with the session unless transferred. */
   stats: PlayerStats;
 };
@@ -63,9 +65,9 @@ export class GuestRegistry extends DurableObject<DoEnv> {
         case "POST /guest/end":
           return await this.endSession(request);
         case "GET /guest/me":
-          return await this.currentSession(url);
+          return await this.currentSession(request, url);
         case "GET /internal/guest/resolve":
-          return await this.resolveGuest(url);
+          return await this.resolveGuest(request);
         case "POST /internal/guest/claim":
           return await this.claim(request);
         case "POST /internal/report":
@@ -87,10 +89,11 @@ export class GuestRegistry extends DurableObject<DoEnv> {
     const body = await safeJson(request);
     const requestedName = sanitizeGuestName(body.displayName);
     const existingId = typeof body.guestId === "string" ? body.guestId : null;
+    const existingSecret = typeof body.guestSecret === "string" ? body.guestSecret : null;
 
     if (existingId) {
       const existing = await this.ctx.storage.get<GuestSession>(key(existingId));
-      if (existing && existing.expiresAt > Date.now()) {
+      if (existing && existing.expiresAt > Date.now() && await validGuestSecret(existing, existingSecret)) {
         existing.lastSeenAt = Date.now();
         existing.expiresAt = existing.lastSeenAt + GUEST_TTL_MS;
         if (requestedName) existing.displayName = requestedName;
@@ -103,6 +106,7 @@ export class GuestRegistry extends DurableObject<DoEnv> {
     const session = await this.ctx.blockConcurrencyWhile(async () => {
       const slot = await this.takeSlot();
       const now = Date.now();
+      const secret = await mintSessionToken();
       const fresh: GuestSession = {
         guestId: `g${slot}-${nonce()}`,
         slot,
@@ -110,24 +114,27 @@ export class GuestRegistry extends DurableObject<DoEnv> {
         createdAt: now,
         lastSeenAt: now,
         expiresAt: now + GUEST_TTL_MS,
+        guestSecretHash: secret.digest,
         stats: emptyStats(),
       };
       await this.ctx.storage.put(key(fresh.guestId), fresh);
-      return fresh;
+      return { session: fresh, guestSecret: secret.token };
     });
 
     await this.armSweep();
-    return json({ guest: toDto(session), reused: false }, 201);
+    return json({ guest: toDto(session.session, session.guestSecret), reused: false }, 201);
   }
 
   private async heartbeat(request: Request): Promise<Response> {
     const body = await safeJson(request);
     const guestId = typeof body.guestId === "string" ? body.guestId : "";
+    const guestSecret = typeof body.guestSecret === "string" ? body.guestSecret : "";
     const session = await this.ctx.storage.get<GuestSession>(key(guestId));
 
     if (!session || session.expiresAt <= Date.now()) {
       return json({ error: "guest_expired", message: "This guest session has expired." }, 404);
     }
+    if (!await validGuestSecret(session, guestSecret)) return json({ error: "unauthorized" }, 401);
 
     session.lastSeenAt = Date.now();
     session.expiresAt = session.lastSeenAt + GUEST_TTL_MS;
@@ -139,29 +146,35 @@ export class GuestRegistry extends DurableObject<DoEnv> {
   private async endSession(request: Request): Promise<Response> {
     const body = await safeJson(request);
     const guestId = typeof body.guestId === "string" ? body.guestId : "";
+    const guestSecret = typeof body.guestSecret === "string" ? body.guestSecret : "";
     const session = await this.ctx.storage.get<GuestSession>(key(guestId));
     if (!session) return json({ ok: true, retired: false });
+    if (!await validGuestSecret(session, guestSecret)) return json({ error: "unauthorized" }, 401);
 
     await this.retire(session);
     return json({ ok: true, retired: true });
   }
 
-  private async currentSession(url: URL): Promise<Response> {
-    const guestId = url.searchParams.get("guestId") ?? "";
+  private async currentSession(request: Request, _url: URL): Promise<Response> {
+    const guestId = request.headers.get("X-Guest-Id")?.trim() || "";
+    const guestSecret = request.headers.get("X-Guest-Secret")?.trim() || "";
     const session = await this.ctx.storage.get<GuestSession>(key(guestId));
     if (!session || session.expiresAt <= Date.now()) {
       return json({ error: "guest_expired" }, 404);
     }
+    if (!await validGuestSecret(session, guestSecret)) return json({ error: "unauthorized" }, 401);
     return json({ guest: toDto(session) });
   }
 
   /** Internal: validates a guest id for the match socket handshake. */
-  private async resolveGuest(url: URL): Promise<Response> {
-    const guestId = url.searchParams.get("guestId") ?? "";
+  private async resolveGuest(request: Request): Promise<Response> {
+    const guestId = request.headers.get("X-Guest-Id")?.trim() || "";
+    const guestSecret = request.headers.get("X-Guest-Secret")?.trim() || "";
     const session = await this.ctx.storage.get<GuestSession>(key(guestId));
     if (!session || session.expiresAt <= Date.now()) {
       return json({ error: "guest_expired" }, 404);
     }
+    if (!await validGuestSecret(session, guestSecret)) return json({ error: "unauthorized" }, 401);
     // Playing counts as activity.
     session.lastSeenAt = Date.now();
     session.expiresAt = session.lastSeenAt + GUEST_TTL_MS;
@@ -181,10 +194,12 @@ export class GuestRegistry extends DurableObject<DoEnv> {
   private async claim(request: Request): Promise<Response> {
     const body = await safeJson(request);
     const guestId = typeof body.guestId === "string" ? body.guestId : "";
+    const guestSecret = typeof body.guestSecret === "string" ? body.guestSecret : "";
 
     const claimed = await this.ctx.blockConcurrencyWhile(async () => {
       const session = await this.ctx.storage.get<GuestSession>(key(guestId));
       if (!session || session.expiresAt <= Date.now()) return null;
+      if (!await validGuestSecret(session, guestSecret)) return null;
       await this.ctx.storage.delete(key(guestId));
       await this.releaseSlot(session.slot);
       return session;
@@ -200,6 +215,11 @@ export class GuestRegistry extends DurableObject<DoEnv> {
     const body = (await safeJson(request)) as { outcome?: MatchOutcome };
     const outcome = body.outcome;
     if (!outcome || outcome.subjectKind !== "GUEST") return json({ error: "bad_request" }, 400);
+
+    const reportKey = `report:${outcome.matchId}:${outcome.subjectKind}:${outcome.subjectId}`;
+    if (await this.ctx.storage.get(reportKey)) {
+      return json({ ok: true, duplicate: true, stats: null });
+    }
 
     const session = await this.ctx.storage.get<GuestSession>(key(outcome.subjectId));
     if (!session) return json({ error: "guest_expired" }, 404);
@@ -228,9 +248,12 @@ export class GuestRegistry extends DurableObject<DoEnv> {
     ).catch(() => null);
 
     session.stats = applyRank(session.stats, upsert?.worldRank ?? null);
-    await this.ctx.storage.put(key(session.guestId), session);
+    await this.ctx.storage.put({
+      [key(session.guestId)]: session,
+      [reportKey]: Date.now(),
+    });
 
-    return json({ ok: true, stats: session.stats });
+    return json({ ok: true, duplicate: false, stats: session.stats });
   }
 
   // -------------------------------------------------------------------- sweep
@@ -308,17 +331,23 @@ function key(guestId: string): string {
 }
 
 function nonce(): string {
-  return crypto.randomUUID().replace(/-/g, "").slice(0, 6);
+  return crypto.randomUUID().replace(/-/g, "");
 }
 
-function toDto(session: GuestSession): GuestSessionDto {
+function toDto(session: GuestSession, guestSecret?: string): GuestSessionDto {
   return {
     kind: "GUEST",
     guestId: session.guestId,
+    ...(guestSecret ? { guestSecret } : {}),
     displayName: session.displayName,
     expiresAt: session.expiresAt,
     stats: normalizeStats(session.stats),
   };
+}
+
+async function validGuestSecret(session: GuestSession, secret: string | null): Promise<boolean> {
+  if (!secret || !session.guestSecretHash) return false;
+  return await sha256Hex(secret) === session.guestSecretHash;
 }
 
 function sanitizeGuestName(raw: unknown): string {

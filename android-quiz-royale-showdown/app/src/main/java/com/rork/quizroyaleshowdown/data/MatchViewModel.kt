@@ -54,9 +54,9 @@ class MatchViewModel(app: Application) : AndroidViewModel(app) {
         get() {
             val token = prefs.sessionToken
             return if (token != null) {
-                MatchCredentials(token = token, guestId = null)
+                MatchCredentials(token = token, guestId = null, guestSecret = null)
             } else {
-                MatchCredentials(token = null, guestId = prefs.guestId)
+                MatchCredentials(token = null, guestId = prefs.guestId, guestSecret = prefs.guestSecret)
             }
         }
 

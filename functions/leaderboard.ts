@@ -22,6 +22,7 @@ import type {
   PlayerStats,
   SubjectKind,
 } from "./identity";
+import { publicLeaderboardSubjectId } from "./identity";
 
 type BoardEntry = {
   subjectKind: SubjectKind;
@@ -74,7 +75,7 @@ export class Leaderboard extends DurableObject {
     const entries: LeaderboardEntryDto[] = ranked.slice(0, limit).map((row, index) => ({
       rank: index + 1,
       subjectKind: row.entry.subjectKind,
-      subjectId: row.entry.subjectId,
+      subjectId: publicLeaderboardSubjectId(row.entry.subjectKind, row.entry.subjectId),
       displayName: row.entry.displayName,
       points: row.points,
       wins: row.entry.wins,

@@ -19,6 +19,7 @@ const managedTables = new Set([
   "friendships",
   "presence",
   "powerup_inventory",
+  "auth_rate_limits",
   "questions",
   "question_usage_events",
   "question_usage_rollups",

@@ -7,6 +7,26 @@ export const PRESENCE_ONLINE_WINDOW_MS = 100 * 1000;
 export const PRESENCE_MATCH_WINDOW_MS = 12 * 60 * 1000;
 
 export type PresenceStatus = "OFFLINE" | "ONLINE" | "IN_MATCH";
+export type UserRole = "player" | "google_play_reviewer";
+
+export const GOOGLE_PLAY_REVIEW_ROLE: UserRole = "google_play_reviewer";
+export const GOOGLE_PLAY_REVIEW_EMAIL = "google-reviewer@quizroyale.gg";
+export const GOOGLE_PLAY_REVIEW_USERNAME = "google_reviewer";
+export const REVIEW_ACCOUNT_BALANCE = 1_000_000_000;
+
+export type UserEntitlements = {
+  isReviewer: boolean;
+  unlimitedCurrency: boolean;
+  allStoreItemsUnlocked: boolean;
+  premiumAccess: boolean;
+  seasonPassAccess: boolean;
+};
+
+export type VirtualCurrencyBalances = {
+  coins: number;
+  gems: number;
+  seasonalTickets: number;
+};
 
 export type PlayerStats = {
   wins: number;
@@ -38,6 +58,51 @@ export function emptyStats(): PlayerStats {
   };
 }
 
+export function reviewAccountEntitlements(): UserEntitlements {
+  return {
+    isReviewer: true,
+    unlimitedCurrency: true,
+    allStoreItemsUnlocked: true,
+    premiumAccess: true,
+    seasonPassAccess: true,
+  };
+}
+
+export function reviewAccountCurrencyBalances(): VirtualCurrencyBalances {
+  return {
+    coins: REVIEW_ACCOUNT_BALANCE,
+    gems: REVIEW_ACCOUNT_BALANCE,
+    seasonalTickets: REVIEW_ACCOUNT_BALANCE,
+  };
+}
+
+export function normalizeEntitlements(raw: unknown): UserEntitlements {
+  const entitlements = typeof raw === "object" && raw !== null ? raw as Partial<UserEntitlements> : {};
+  return {
+    isReviewer: entitlements.isReviewer === true,
+    unlimitedCurrency: entitlements.unlimitedCurrency === true,
+    allStoreItemsUnlocked: entitlements.allStoreItemsUnlocked === true,
+    premiumAccess: entitlements.premiumAccess === true,
+    seasonPassAccess: entitlements.seasonPassAccess === true,
+  };
+}
+
+export function normalizeCurrencyBalances(raw: unknown): VirtualCurrencyBalances {
+  const balances = typeof raw === "object" && raw !== null ? raw as Partial<VirtualCurrencyBalances> : {};
+  return {
+    coins: normalizeBalance(balances.coins),
+    gems: normalizeBalance(balances.gems),
+    seasonalTickets: normalizeBalance(balances.seasonalTickets),
+  };
+}
+
+export function applyReviewAccountAccess(rawStats: unknown): PlayerStats {
+  return {
+    ...normalizeStats(rawStats),
+    powerUpCharges: REVIEW_ACCOUNT_BALANCE,
+  };
+}
+
 export function normalizeStats(raw: unknown): PlayerStats {
   const stats = typeof raw === "object" && raw !== null ? (raw as Partial<PlayerStats>) : {};
   return {
@@ -47,6 +112,10 @@ export function normalizeStats(raw: unknown): PlayerStats {
     bestRank: stats.bestRank ?? null,
     bestPlacement: stats.bestPlacement ?? null,
   };
+}
+
+function normalizeBalance(raw: unknown): number {
+  return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
 }
 
 export function applyRank(rawStats: PlayerStats, rank: number | null): PlayerStats {
@@ -137,6 +206,9 @@ export type UserProfileDto = {
   userId: string;
   username: string;
   email: string;
+  role: UserRole;
+  entitlements: UserEntitlements;
+  currencyBalances: VirtualCurrencyBalances;
   createdAt: number;
   stats: PlayerStats;
   friends: FriendDto[];
@@ -145,6 +217,7 @@ export type UserProfileDto = {
 export type GuestSessionDto = {
   kind: "GUEST";
   guestId: string;
+  guestSecret?: string;
   displayName: string;
   expiresAt: number;
   stats: PlayerStats;
@@ -174,6 +247,11 @@ export type LeaderboardDto = {
   yourPoints: number;
   totalRanked: number;
 };
+
+export function publicLeaderboardSubjectId(subjectKind: SubjectKind, subjectId: string): string {
+  if (subjectKind === "USER") return subjectId;
+  return `guest-${subjectId.replace(/^g/, "").split("-")[0] ?? "anon"}`;
+}
 
 export type PresenceRecord = {
   lastSeenAt: number;

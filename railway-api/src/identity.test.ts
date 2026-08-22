@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyOutcome, derivePresence, emptyStats, mergeStats } from "./identity.js";
+import { applyOutcome, derivePresence, emptyStats, mergeStats, publicLeaderboardSubjectId } from "./identity.js";
 
 test("match outcomes update shared user and guest stat shape", () => {
   const next = applyOutcome(emptyStats(), {
@@ -50,4 +50,9 @@ test("presence drops stale in-match claims", () => {
 
   assert.equal(derivePresence({ lastSeenAt: now, status: "IN_MATCH", matchMode: "QUICK", statusAt: now }, now).presence, "IN_MATCH");
   assert.equal(derivePresence({ lastSeenAt: 1, status: "IN_MATCH", matchMode: "QUICK", statusAt: 1 }, now).presence, "OFFLINE");
+});
+
+test("leaderboard public ids do not expose guest bearer ids", () => {
+  assert.equal(publicLeaderboardSubjectId("USER", "u-1"), "u-1");
+  assert.notEqual(publicLeaderboardSubjectId("GUEST", "g1000-abcdef123456"), "g1000-abcdef123456");
 });

@@ -28,10 +28,27 @@ data class PlayerStats(
     val bestRank: Int? = null
 )
 
+@Serializable
+data class UserEntitlements(
+    val isReviewer: Boolean = false,
+    val unlimitedCurrency: Boolean = false,
+    val allStoreItemsUnlocked: Boolean = false,
+    val premiumAccess: Boolean = false,
+    val seasonPassAccess: Boolean = false
+)
+
+@Serializable
+data class VirtualCurrencyBalances(
+    val coins: Int = 0,
+    val gems: Int = 0,
+    val seasonalTickets: Int = 0
+)
+
 /** A temporary identity. Note the absence of email/password/friends. */
 @Serializable
 data class GuestSession(
     val guestId: String,
+    val guestSecret: String? = null,
     val displayName: String,
     /** Epoch ms at which this id lapses unless the player stays active. */
     val expiresAt: Long,
@@ -71,6 +88,9 @@ data class UserProfile(
     val userId: String,
     val username: String,
     val email: String,
+    val role: String = "player",
+    val entitlements: UserEntitlements = UserEntitlements(),
+    val currencyBalances: VirtualCurrencyBalances = VirtualCurrencyBalances(),
     val createdAt: Long = 0L,
     val stats: PlayerStats = PlayerStats(),
     val friends: List<Friend> = emptyList()
