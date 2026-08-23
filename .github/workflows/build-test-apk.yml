@@ -1,6 +1,9 @@
 name: Build Test APK
 
 on:
+  push:
+    branches:
+      - agent/build-test-apk
   pull_request:
     branches:
       - Railway-API-Implementation
