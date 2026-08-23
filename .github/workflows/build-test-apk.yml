@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - agent/build-test-apk-railway-20260823
+  pull_request:
+    branches:
+      - Railway-API-Implementation
 
 permissions:
   contents: read
