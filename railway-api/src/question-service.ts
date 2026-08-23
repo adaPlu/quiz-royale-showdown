@@ -13,20 +13,15 @@ import {
   normalizeText,
   questionContentHash,
   questionInputSchema,
-  rowToQuestion,
   type Difficulty,
   type QuestionForMatch,
   type QuestionInput,
   type QuestionRecord,
-  type QuestionSource,
   type QuestionStatus,
 } from "./questions.js";
 
 const QUESTION_POOL_TTL_SECONDS = 60;
 const LEADERBOARD_CACHE_TTL_SECONDS = 15;
-const MIN_POOL_MULTIPLIER = 3;
-const TARGET_POOL_MULTIPLIER = 5;
-const REUSE_THRESHOLD = 0.08;
 const GENERATION_LOCK_SECONDS = 5 * 60;
 
 export const selectQuestionsSchema = z.object({
@@ -56,10 +51,7 @@ export const generateQuestionsSchema = z.object({
 export type UsageReport = z.infer<typeof usageReportSchema>;
 
 type UsageRecordDeps = {
-  db?: DbClient;
   transaction?: <T>(work: (client: DbClient) => Promise<T>) => Promise<T>;
-  generate?: typeof generateQuestions;
-  matchSize?: number;
 };
 
 type QuestionGenerationLockDeps<T> = {
@@ -67,25 +59,19 @@ type QuestionGenerationLockDeps<T> = {
   advisoryLock?: (key: string, run: () => Promise<T>) => Promise<T | null>;
 };
 
-type QuestionRow = {
-  question_id: string;
+type QuestionBankRow = {
+  id: string;
+  prompt: string;
+  optionA: string;
+  optionB: string;
+  optionC: string;
+  optionD: string;
+  correctIndex: number;
   category: string;
-  difficulty: Difficulty;
-  text: string;
-  options: unknown;
-  correct_index: number;
-  content_hash: string;
-  source: QuestionSource;
-  status: QuestionStatus;
-  created_at: string | number;
-  updated_at: string | number;
-};
-
-type RepetitionCandidate = {
-  category: string;
-  difficulty: Difficulty;
-  requestedCount: number;
-  reason: string;
+  difficulty: string;
+  lastUsedAt: string | Date | null;
+  isActive: boolean;
+  createdAt: string | Date | null;
 };
 
 export async function selectQuestionSet(db: DbClient, count: number): Promise<QuestionForMatch[]> {
@@ -125,22 +111,23 @@ export async function upsertQuestions(db: DbClient, records: QuestionRecord[]): 
   let duplicates = 0;
   for (const question of records) {
     const result = await db.query(
-      `INSERT INTO questions(question_id, category, difficulty, text, options, correct_index, content_hash, source, status, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-       ON CONFLICT (content_hash) DO NOTHING
-       RETURNING question_id`,
+      `INSERT INTO "QuestionBank"(id, prompt, "optionA", "optionB", "optionC", "optionD", "correctIndex",
+                                  category, difficulty, "lastUsedAt", "isActive", "createdAt")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, upper($9)::"Difficulty", NULL, $10, to_timestamp($11 / 1000.0))
+       ON CONFLICT (id) DO NOTHING
+       RETURNING id`,
       [
         question.questionId,
+        question.text,
+        question.options[0],
+        question.options[1],
+        question.options[2],
+        question.options[3],
+        question.correct,
         question.category,
         question.difficulty,
-        question.text,
-        JSON.stringify(question.options),
-        question.correct,
-        question.contentHash,
-        question.source,
-        question.status,
+        question.status === "active",
         question.createdAt,
-        question.updatedAt,
       ],
     );
     if (result.rowCount) inserted += 1;
@@ -154,37 +141,26 @@ export async function recordUsage(
   report: UsageReport,
   deps: UsageRecordDeps = {},
 ): Promise<{ inserted: number; generationJobs: number }> {
-  const database = deps.db ?? pool;
   const transaction = deps.transaction ?? tx;
-  const generate = deps.generate ?? generateQuestions;
-  const insertedBuckets = new Set<string>();
   let inserted = 0;
+  const seen = new Set<string>();
   await transaction(async (client) => {
     for (const item of report.questions) {
+      if (seen.has(item.questionId)) continue;
+      seen.add(item.questionId);
       const askedAt = item.askedAt ?? Date.now();
       const result = await client.query(
-        `INSERT INTO question_usage_events(match_id, round_number, question_id, mode, category, difficulty, asked_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT DO NOTHING
-         RETURNING question_id`,
-        [report.matchId, item.roundNumber, item.questionId, report.mode, item.category, item.difficulty, askedAt],
+        `UPDATE "QuestionBank"
+         SET "lastUsedAt" = to_timestamp($2 / 1000.0)
+         WHERE id = $1`,
+        [item.questionId, askedAt],
       );
-      if (!result.rowCount) continue;
-      inserted += 1;
-      insertedBuckets.add(bucketKey(item.category, item.difficulty));
-      await updateUsageRollups(client, item.questionId, item.category, item.difficulty, askedAt);
+      inserted += result.rowCount ?? 0;
     }
   });
 
-  let generationJobs = 0;
-  for (const key of insertedBuckets) {
-    const [category, difficulty] = key.split("|") as [string, Difficulty];
-    const candidate = await repetitionCandidate(database, category, difficulty, deps.matchSize ?? 10);
-    if (!candidate) continue;
-    const job = await generate(candidate.category, candidate.difficulty, candidate.requestedCount, candidate.reason);
-    if (job.status !== "skipped") generationJobs += 1;
-  }
-  return { inserted, generationJobs };
+  if (inserted > 0) await invalidateQuestionCaches();
+  return { inserted, generationJobs: 0 };
 }
 
 export async function generateQuestions(
@@ -193,31 +169,28 @@ export async function generateQuestions(
   requestedCount: number,
   reason: string,
 ): Promise<{ jobId: string; status: "completed" | "failed" | "skipped"; inserted: number; duplicates: number; error?: string }> {
+  const jobId = `qgen-${crypto.randomUUID()}`;
   if (!CATEGORIES.includes(category)) {
-    return { jobId: "", status: "skipped", inserted: 0, duplicates: 0, error: "unknown_category" };
+    return { jobId, status: "skipped", inserted: 0, duplicates: 0, error: "unknown_category" };
   }
   if (!process.env.OPENAI_API_KEY) {
-    const jobId = await writeGenerationJob(category, difficulty, requestedCount, "skipped", reason, "OPENAI_API_KEY is not configured");
     return { jobId, status: "skipped", inserted: 0, duplicates: 0, error: "OPENAI_API_KEY is not configured" };
   }
 
   const result = await runWithQuestionGenerationLock(category, difficulty, async () => {
-    const jobId = await writeGenerationJob(category, difficulty, requestedCount, "running", reason, null);
     try {
       const generated = await callOpenAiForQuestions(category, difficulty, requestedCount);
       const normalized = generated.questions
         .map((question) => normalizeGeneratedQuestionForStorage(question, category, difficulty))
         .filter((question): question is QuestionRecord => Boolean(question));
       const save = await upsertQuestions(pool, normalized);
-      await writeGenerationJob(category, difficulty, requestedCount, "completed", reason, null, jobId);
       return { jobId, status: "completed" as const, inserted: save.inserted, duplicates: save.duplicates };
     } catch (error) {
       const message = (error as Error).message.slice(0, 500);
-      await writeGenerationJob(category, difficulty, requestedCount, "failed", reason, message, jobId);
       return { jobId, status: "failed" as const, inserted: 0, duplicates: 0, error: message };
     }
   });
-  return result ?? { jobId: "", status: "skipped", inserted: 0, duplicates: 0, error: "generation already running" };
+  return result ?? { jobId, status: "skipped", inserted: 0, duplicates: 0, error: "generation already running" };
 }
 
 export function normalizeGeneratedQuestionForStorage(
@@ -310,107 +283,68 @@ export async function invalidateQuestionCaches(): Promise<void> {
 async function activeQuestions(db: DbClient, difficulty: Difficulty): Promise<QuestionRecord[]> {
   const key = questionPoolKey(difficulty);
   const cached = await getJson<QuestionRecord[]>(key);
-  if (cached) return cached;
-  const rows = await db.query<QuestionRow>(
-    `SELECT * FROM questions
-     WHERE status = 'active' AND difficulty = $1
-     ORDER BY updated_at ASC`,
-    [difficulty],
-  );
-  const questions = rows.rows.map(rowToQuestion);
-  await setJson(key, questions, QUESTION_POOL_TTL_SECONDS);
-  return questions;
+  if (cached?.length) return cached;
+  const questionBankRows = await activeQuestionBankQuestions(db, difficulty);
+  if (questionBankRows.length > 0) {
+    await setJson(key, questionBankRows, QUESTION_POOL_TTL_SECONDS);
+    return questionBankRows;
+  }
+  return [];
 }
 
-async function repetitionCandidate(
-  db: DbClient,
-  category: string,
-  difficulty: Difficulty,
-  matchSize: number,
-): Promise<RepetitionCandidate | null> {
-  const active = await db.query<{ count: string }>(
-    "SELECT count(*) FROM questions WHERE status = 'active' AND category = $1 AND difficulty = $2",
-    [category, difficulty],
-  );
-  const poolSize = Number(active.rows[0]?.count ?? 0);
-  const minPool = matchSize * MIN_POOL_MULTIPLIER;
-  if (poolSize < minPool) {
-    return {
-      category,
-      difficulty,
-      requestedCount: Math.min(50, Math.max(1, matchSize * TARGET_POOL_MULTIPLIER - poolSize)),
-      reason: `pool below ${MIN_POOL_MULTIPLIER}x match size`,
-    };
-  }
-
-  const since = Date.now() - 24 * 60 * 60 * 1000;
-  const recent = await db.query<{ total: string; top_count: string }>(
-    `WITH bucket AS (
-       SELECT question_id, count(*)::int AS asked_count
-       FROM question_usage_events
-       WHERE category = $1 AND difficulty = $2 AND asked_at >= $3
-       GROUP BY question_id
-     )
-     SELECT COALESCE(sum(asked_count), 0)::text AS total,
-            COALESCE(max(asked_count), 0)::text AS top_count
-     FROM bucket`,
-    [category, difficulty, since],
-  );
-  const total = Number(recent.rows[0]?.total ?? 0);
-  const top = Number(recent.rows[0]?.top_count ?? 0);
-  if (total >= 25 && top / total > REUSE_THRESHOLD) {
-    return {
-      category,
-      difficulty,
-      requestedCount: Math.min(50, Math.max(5, matchSize * TARGET_POOL_MULTIPLIER - poolSize)),
-      reason: `top question reuse ${(top / total).toFixed(3)} exceeded ${REUSE_THRESHOLD}`,
-    };
-  }
-  return null;
-}
-
-async function updateUsageRollups(
-  db: DbClient,
-  questionId: string,
-  category: string,
-  difficulty: Difficulty,
-  askedAt: number,
-): Promise<void> {
-  const windows = [
-    ["1h", 60 * 60 * 1000],
-    ["24h", 24 * 60 * 60 * 1000],
-    ["7d", 7 * 24 * 60 * 60 * 1000],
-  ] as const;
-  for (const [name, span] of windows) {
-    const started = Math.floor(askedAt / span) * span;
-    await db.query(
-      `INSERT INTO question_usage_rollups(window_name, category, difficulty, question_id, asked_count, window_started_at, updated_at)
-       VALUES ($1, $2, $3, $4, 1, $5, $6)
-       ON CONFLICT (window_name, category, difficulty, question_id, window_started_at)
-       DO UPDATE SET asked_count = question_usage_rollups.asked_count + 1, updated_at = EXCLUDED.updated_at`,
-      [name, category, difficulty, questionId, started, Date.now()],
+async function activeQuestionBankQuestions(db: DbClient, difficulty: Difficulty): Promise<QuestionRecord[]> {
+  try {
+    const rows = await db.query<QuestionBankRow>(
+      `SELECT id, prompt, "optionA", "optionB", "optionC", "optionD", "correctIndex",
+              category, difficulty::text AS difficulty, "lastUsedAt", "isActive", "createdAt"
+       FROM "QuestionBank"
+       WHERE "isActive" = true AND lower(difficulty::text) = $1
+       ORDER BY "lastUsedAt" ASC NULLS FIRST, "createdAt" ASC`,
+      [difficulty],
     );
+    return rows.rows.map(rowToQuestionBankQuestion).filter((question): question is QuestionRecord => Boolean(question));
+  } catch (error) {
+    if (isMissingTableError(error)) return [];
+    throw error;
   }
 }
 
-async function writeGenerationJob(
-  category: string,
-  difficulty: Difficulty,
-  requestedCount: number,
-  status: "running" | "completed" | "failed" | "skipped",
-  reason: string,
-  error: string | null,
-  existingJobId?: string,
-): Promise<string> {
-  const jobId = existingJobId ?? `qgen-${crypto.randomUUID()}`;
-  await pool.query(
-    `INSERT INTO question_generation_jobs(job_id, category, difficulty, requested_count, status, reason, error, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
-     ON CONFLICT (job_id)
-     DO UPDATE SET status = EXCLUDED.status, error = EXCLUDED.error, updated_at = EXCLUDED.updated_at`,
-    [jobId, category, difficulty, requestedCount, status, reason, error, Date.now()],
-  );
-  return jobId;
+function rowToQuestionBankQuestion(row: QuestionBankRow): QuestionRecord | null {
+  const difficulty = row.difficulty.toLowerCase();
+  if (!DIFFICULTIES.includes(difficulty as Difficulty)) return null;
+  const options = [row.optionA, row.optionB, row.optionC, row.optionD].map(normalizeText);
+  if (options.some((option) => option.length === 0)) return null;
+  const correct = Number(row.correctIndex);
+  if (!Number.isInteger(correct) || correct < 0 || correct >= options.length) return null;
+  const text = normalizeText(row.prompt);
+  if (text.length < 8) return null;
+  const questionId = normalizeQuestionId(row.id);
+  const createdAt = timestampToMs(row.createdAt) ?? Date.now();
+  const updatedAt = timestampToMs(row.lastUsedAt) ?? createdAt;
+  return {
+    questionId,
+    category: normalizeText(row.category),
+    difficulty: difficulty as Difficulty,
+    text,
+    options,
+    correct,
+    contentHash: `questionbank:${questionId}`,
+    source: "import",
+    status: "active",
+    createdAt,
+    updatedAt,
+  };
+}
+
+function timestampToMs(value: string | Date | null): number | null {
+  if (!value) return null;
+  if (value instanceof Date) return value.getTime();
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isMissingTableError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "42P01";
 }
 
 async function callOpenAiForQuestions(
@@ -523,10 +457,6 @@ function toMatchQuestion(question: QuestionRecord): QuestionForMatch {
 
 function questionPoolKey(difficulty: Difficulty): string {
   return `questions:active:${difficulty}`;
-}
-
-function bucketKey(category: string, difficulty: Difficulty): string {
-  return `${category}|${difficulty}`;
 }
 
 function shuffle<T>(input: T[]): T[] {

@@ -41,26 +41,16 @@ test("question upsert treats content-hash conflicts as duplicates", async () => 
   assert.deepEqual(result, { inserted: 1, duplicates: 1 });
 });
 
-test("usage reporting is idempotent and triggers one generation job per inserted bucket", async () => {
+test("usage reporting updates QuestionBank last-used timestamps without lowercase question tables", async () => {
   const insertedEvents = [1, 0];
   const transactionClient = {
     async query(sql: string) {
-      if (sql.includes("INSERT INTO question_usage_events")) {
+      if (sql.includes("UPDATE \"QuestionBank\"")) {
         return { rowCount: insertedEvents.shift() ?? 0, rows: [] };
-      }
-      if (sql.includes("INSERT INTO question_usage_rollups")) {
-        return { rowCount: 1, rows: [] };
       }
       throw new Error(`unexpected transaction query: ${sql}`);
     },
   };
-  const db = {
-    async query(sql: string) {
-      if (sql.includes("count(*) FROM questions")) return { rowCount: 1, rows: [{ count: "0" }] };
-      throw new Error(`unexpected db query: ${sql}`);
-    },
-  };
-  const generations: Array<{ category: string; difficulty: Difficulty; count: number; reason: string }> = [];
   const report: UsageReport = {
     matchId: "match-1",
     mode: "QUICK",
@@ -71,22 +61,10 @@ test("usage reporting is idempotent and triggers one generation job per inserted
   };
 
   const result = await recordUsage(report, {
-    db: db as unknown as DbClient,
-    matchSize: 2,
     transaction: async (work) => await work(transactionClient as unknown as DbClient),
-    generate: async (category, difficulty, count, reason) => {
-      generations.push({ category, difficulty, count, reason });
-      return { jobId: "job-1", status: "completed", inserted: count, duplicates: 0 };
-    },
   });
 
-  assert.deepEqual(result, { inserted: 1, generationJobs: 1 });
-  assert.deepEqual(generations, [{
-    category: "Science",
-    difficulty: "easy",
-    count: 10,
-    reason: "pool below 3x match size",
-  }]);
+  assert.deepEqual(result, { inserted: 1, generationJobs: 0 });
 });
 
 test("OpenAI response text extractor supports SDK and raw REST shapes", () => {
@@ -164,17 +142,18 @@ class FakeQuestionDb {
       rows: this.rows
         .filter((question) => question.difficulty === difficulty)
         .map((question) => ({
-          question_id: question.questionId,
+          id: question.questionId,
+          prompt: question.text,
+          optionA: question.options[0],
+          optionB: question.options[1],
+          optionC: question.options[2],
+          optionD: question.options[3],
+          correctIndex: question.correct,
           category: question.category,
-          difficulty: question.difficulty,
-          text: question.text,
-          options: question.options,
-          correct_index: question.correct,
-          content_hash: question.contentHash,
-          source: question.source,
-          status: question.status,
-          created_at: question.createdAt,
-          updated_at: question.updatedAt,
+          difficulty: question.difficulty.toUpperCase(),
+          lastUsedAt: null,
+          isActive: question.status === "active",
+          createdAt: new Date(question.createdAt),
         })),
     };
   }
