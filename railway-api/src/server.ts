@@ -35,13 +35,19 @@ import {
   reviewAccountCurrencyBalances,
   reviewAccountEntitlements,
   type AuthResultDto,
+  type CosmeticItemDto,
+  type CurrencyKind,
   type FriendDto,
+  type FriendInviteDto,
   type GuestSessionDto,
   type LeaderboardDto,
   type MatchOutcome,
   type PlayerStats,
   type PresenceRecord,
+  type SeasonDto,
+  type SeasonProgressDto,
   type SubjectKind,
+  type StoreItemDto,
   type UserEntitlements,
   type UserProfileDto,
   type UserRole,
@@ -70,6 +76,8 @@ const AUTH_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 const AUTH_RATE_LIMIT_MAX = Number.parseInt(process.env.AUTH_RATE_LIMIT_MAX ?? "20", 10);
 const GUEST_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 const GUEST_RATE_LIMIT_MAX = Number.parseInt(process.env.GUEST_RATE_LIMIT_MAX ?? "240", 10);
+const MAX_PENDING_INVITES = 50;
+const SEASON_XP_PER_LEVEL = 1_000;
 
 const CORS: Record<string, string> = {
   "Access-Control-Allow-Origin": process.env.CORS_ORIGIN ?? "*",
@@ -98,6 +106,55 @@ type GuestRow = {
   last_seen_at: string | number;
   expires_at: string | number;
   guest_secret_digest: string | null;
+};
+
+type FriendInviteStatus = "pending" | "accepted" | "declined" | "canceled";
+
+type FriendInviteRow = {
+  invite_id: string;
+  from_user_id: string;
+  from_username: string;
+  to_user_id: string;
+  to_username: string;
+  status: FriendInviteStatus;
+  created_at: string | number;
+  responded_at: string | number | null;
+};
+
+type SeasonRow = {
+  season_id: string;
+  name: string;
+  starts_at: string | number;
+  ends_at: string | number;
+  reward_track: unknown;
+};
+
+type SeasonProgressRow = {
+  season_id: string;
+  xp: number;
+  level: number;
+  tickets_earned: number;
+  updated_at: string | number;
+};
+
+type StoreItemRow = {
+  item_id: string;
+  item_type: StoreItemDto["itemType"];
+  display_name: string;
+  description: string;
+  currency: CurrencyKind;
+  price: number;
+  payload: Record<string, unknown> | null;
+};
+
+type CosmeticItemRow = {
+  cosmetic_id: string;
+  cosmetic_type: CosmeticItemDto["cosmeticType"];
+  display_name: string;
+  rarity: CosmeticItemDto["rarity"];
+  payload: Record<string, unknown> | null;
+  owned?: boolean;
+  equipped?: boolean;
 };
 
 const matchOutcomeSchema = z.object({
@@ -145,10 +202,18 @@ export async function handleRequest(request: http.IncomingMessage, response: htt
     if (request.method === "GET" && url.pathname === "/friends") return sendResponse(response, await listFriends(request));
     if (request.method === "POST" && url.pathname === "/friends/add") return sendResponse(response, await addFriend(request));
     if (request.method === "POST" && url.pathname === "/friends/remove") return sendResponse(response, await removeFriend(request));
+    if (request.method === "GET" && url.pathname === "/friends/invites") return sendResponse(response, await listFriendInvites(request));
+    if (request.method === "POST" && url.pathname === "/friends/invites") return sendResponse(response, await sendFriendInvite(request));
+    if (request.method === "POST" && url.pathname === "/friends/invites/respond") return sendResponse(response, await respondFriendInvite(request));
     if (request.method === "GET" && url.pathname === "/users/search") return sendResponse(response, await rateLimited(request, "user-search", () => searchUsers(request, url)));
     if (request.method === "POST" && url.pathname === "/presence/ping") return sendResponse(response, await presencePing(request));
     if (request.method === "POST" && url.pathname === "/internal/presence") return sendResponse(response, await internalPresence(request));
     if (request.method === "GET" && url.pathname === "/powerups") return sendResponse(response, await powerups(request, url));
+    if (request.method === "GET" && url.pathname === "/seasons/current") return sendResponse(response, await currentSeason(request));
+    if (request.method === "GET" && url.pathname === "/store/items") return sendResponse(response, await storeItems(request));
+    if (request.method === "POST" && url.pathname === "/store/purchase") return sendResponse(response, await purchaseStoreItem(request));
+    if (request.method === "GET" && url.pathname === "/cosmetics") return sendResponse(response, await cosmetics(request));
+    if (request.method === "POST" && url.pathname === "/cosmetics/equip") return sendResponse(response, await equipCosmetic(request));
 
     if (request.method === "GET" && url.pathname === "/leaderboard/boards") return send(response, 200, { boards: [WORLD_BOARD, ...CATEGORIES] });
     if (request.method === "GET" && url.pathname === "/leaderboard") {
@@ -412,6 +477,8 @@ async function guestSession(request: http.IncomingMessage): Promise<ApiResponse>
         const expiresAt = now + GUEST_TTL_MS;
         const name = displayName
           ? await availableGuestDisplayName(client, displayName, existing.guest_id)
+          : isLegacyAutoGuestDisplayName(existing.display_name)
+            ? await availableGuestDisplayName(client, "", existing.guest_id)
           : existing.display_name;
         await client.query(
           "UPDATE guests SET display_name = $2, last_seen_at = $3, expires_at = $4 WHERE guest_id = $1",
@@ -568,6 +635,88 @@ async function removeFriend(request: http.IncomingMessage): Promise<ApiResponse>
   return [200, { ok: true, profile }];
 }
 
+async function listFriendInvites(request: http.IncomingMessage): Promise<ApiResponse> {
+  const meRow = await authenticate(request);
+  if (!meRow) return [401, { error: "unauthorized" }];
+  await touchPresence(pool, meRow.user_id, null);
+  return [200, await friendInvitesPayload(pool, meRow.user_id)];
+}
+
+async function sendFriendInvite(request: http.IncomingMessage): Promise<ApiResponse> {
+  const meRow = await authenticate(request);
+  if (!meRow) return [401, { error: "unauthorized" }];
+  const body = await safeJson(request);
+  const username = typeof body.username === "string" ? body.username.trim() : "";
+  if (!username) return [400, { error: "validation_failed", message: "Enter a username." }];
+
+  const result = await tx(async (client) => {
+    const target = await findUserByIdentifier(client, username);
+    if (!target) return { status: 404 as const, body: { error: "not_found", message: "No player with that username." } };
+    if (target.user_id === meRow.user_id) return { status: 400 as const, body: { error: "invalid", message: "You cannot invite yourself." } };
+    const existingFriend = await client.query(
+      "SELECT 1 FROM friendships WHERE user_id = $1 AND friend_user_id = $2",
+      [meRow.user_id, target.user_id],
+    );
+    if (existingFriend.rowCount) return { status: 409 as const, body: { error: "already_friends", message: `${target.username} is already a friend.` } };
+    const inbound = await client.query<{ invite_id: string }>(
+      `SELECT invite_id FROM friend_invites
+       WHERE from_user_id = $1 AND to_user_id = $2 AND status = 'pending'
+       LIMIT 1`,
+      [target.user_id, meRow.user_id],
+    );
+    if (inbound.rows[0]) {
+      return await acceptFriendInviteInTx(client, meRow, inbound.rows[0].invite_id);
+    }
+    const pending = await client.query<{ count: string }>(
+      "SELECT count(*) FROM friend_invites WHERE from_user_id = $1 AND status = 'pending'",
+      [meRow.user_id],
+    );
+    if (Number(pending.rows[0]?.count ?? 0) >= MAX_PENDING_INVITES) {
+      return { status: 409 as const, body: { error: "limit_reached", message: "You have too many pending invites." } };
+    }
+
+    const now = Date.now();
+    await client.query(
+      `INSERT INTO friend_invites(invite_id, from_user_id, to_user_id, status, created_at)
+       VALUES ($1, $2, $3, 'pending', $4)
+       ON CONFLICT DO NOTHING`,
+      [`fi-${crypto.randomUUID()}`, meRow.user_id, target.user_id, now],
+    );
+    return { status: 201 as const, body: { ok: true, ...(await friendInvitesPayload(client, meRow.user_id)) } };
+  });
+  return [result.status, result.body];
+}
+
+async function respondFriendInvite(request: http.IncomingMessage): Promise<ApiResponse> {
+  const meRow = await authenticate(request);
+  if (!meRow) return [401, { error: "unauthorized" }];
+  const body = await safeJson(request);
+  const inviteId = typeof body.inviteId === "string" ? body.inviteId.trim() : "";
+  const action = typeof body.action === "string" ? body.action.trim().toLowerCase() : "";
+  if (!inviteId) return [400, { error: "validation_failed", message: "Missing invite id." }];
+  if (!["accept", "decline", "cancel"].includes(action)) {
+    return [400, { error: "validation_failed", message: "Unsupported invite action." }];
+  }
+
+  const result = await tx(async (client) => {
+    if (action === "accept") return await acceptFriendInviteInTx(client, meRow, inviteId);
+    const invite = await getPendingFriendInvite(client, inviteId);
+    if (!invite) return { status: 404 as const, body: { error: "not_found", message: "That invite is no longer pending." } };
+    if (action === "decline" && invite.to_user_id !== meRow.user_id) {
+      return { status: 403 as const, body: { error: "forbidden", message: "Only the invited player can decline this invite." } };
+    }
+    if (action === "cancel" && invite.from_user_id !== meRow.user_id) {
+      return { status: 403 as const, body: { error: "forbidden", message: "Only the sender can cancel this invite." } };
+    }
+    await client.query(
+      "UPDATE friend_invites SET status = $2, responded_at = $3 WHERE invite_id = $1",
+      [inviteId, action === "decline" ? "declined" : "canceled", Date.now()],
+    );
+    return { status: 200 as const, body: { ok: true, ...(await friendInvitesPayload(client, meRow.user_id)) } };
+  });
+  return [result.status, result.body];
+}
+
 async function searchUsers(request: http.IncomingMessage, url: URL): Promise<ApiResponse> {
   const meRow = await authenticate(request);
   if (!meRow) return [401, { error: "unauthorized" }];
@@ -617,6 +766,121 @@ async function powerups(request: http.IncomingMessage, url: URL): Promise<ApiRes
   if (!guest || Number(guest.expires_at) <= Date.now()) return [404, { error: "guest_expired" }];
   if (!validGuestSecret(guest, guestSecret)) return [401, { error: "unauthorized" }];
   return [200, { inventory: await getPowerupInventory(pool, "GUEST", guestId) }];
+}
+
+async function currentSeason(request: http.IncomingMessage): Promise<ApiResponse> {
+  const record = await authenticate(request);
+  if (!record) return [401, { error: "unauthorized" }];
+  const season = await getActiveSeason(pool);
+  if (!season) return [404, { error: "not_found", message: "No active season is configured." }];
+  const progress = await getSeasonProgress(pool, record.user_id, season.season_id);
+  return [200, { season: seasonDto(season), progress }];
+}
+
+async function storeItems(request: http.IncomingMessage): Promise<ApiResponse> {
+  const record = await authenticate(request);
+  if (!record) return [401, { error: "unauthorized" }];
+  return [200, {
+    balances: currencyBalancesFor(record),
+    items: await hydrateStoreItems(pool, record),
+  }];
+}
+
+async function purchaseStoreItem(request: http.IncomingMessage): Promise<ApiResponse> {
+  const record = await authenticate(request);
+  if (!record) return [401, { error: "unauthorized" }];
+  const body = await safeJson(request);
+  const itemId = typeof body.itemId === "string" ? body.itemId.trim() : "";
+  const idempotencyKey = typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim().slice(0, 120) : "";
+  if (!itemId || !idempotencyKey) {
+    return [400, { error: "validation_failed", message: "Missing store item or idempotency key." }];
+  }
+
+  const result = await tx(async (client) => {
+    const user = await getUserForUpdate(client, record.user_id);
+    if (!user) return { status: 404 as const, body: { error: "not_found" } };
+    const existing = await client.query(
+      "SELECT 1 FROM store_purchases WHERE user_id = $1 AND idempotency_key = $2",
+      [user.user_id, idempotencyKey],
+    );
+    if (existing.rowCount) {
+      return {
+        status: 200 as const,
+        body: await storeStatePayload(client, user, { duplicate: true }),
+      };
+    }
+
+    const item = await getStoreItem(client, itemId);
+    if (!item) return { status: 404 as const, body: { error: "not_found", message: "That store item is unavailable." } };
+    const entitlements = normalizeEntitlements(user.entitlements);
+    if (item.item_type === "COSMETIC") {
+      const cosmeticId = storePayloadString(item.payload, "cosmeticId");
+      if (!cosmeticId) return { status: 409 as const, body: { error: "invalid_item", message: "This cosmetic item is misconfigured." } };
+      const owned = await ownsCosmetic(client, user.user_id, cosmeticId);
+      if (owned || entitlements.allStoreItemsUnlocked) {
+        return { status: 409 as const, body: { error: "already_owned", message: "You already own this cosmetic." } };
+      }
+    }
+    if (item.item_type === "SEASON_PASS" && entitlements.seasonPassAccess) {
+      return { status: 409 as const, body: { error: "already_owned", message: "You already have season pass access." } };
+    }
+
+    if (!entitlements.unlimitedCurrency && item.price > 0) {
+      const debit = await adjustCurrency(client, user, item.currency, -item.price, "store_purchase", idempotencyKey);
+      if (!debit.ok) return { status: 409 as const, body: { error: "insufficient_funds", message: "Not enough currency." } };
+      user.currency_balances = debit.balances;
+    }
+
+    const purchaseId = `sp-${crypto.randomUUID()}`;
+    await client.query(
+      `INSERT INTO store_purchases(purchase_id, user_id, item_id, idempotency_key, currency, price, purchased_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [purchaseId, user.user_id, item.item_id, idempotencyKey, item.currency, item.price, Date.now()],
+    );
+    await grantStoreItem(client, user, item);
+    return {
+      status: 200 as const,
+      body: await storeStatePayload(client, user, { duplicate: false, purchaseId }),
+    };
+  });
+  return [result.status, result.body];
+}
+
+async function cosmetics(request: http.IncomingMessage): Promise<ApiResponse> {
+  const record = await authenticate(request);
+  if (!record) return [401, { error: "unauthorized" }];
+  return [200, { cosmetics: await hydrateCosmetics(pool, record) }];
+}
+
+async function equipCosmetic(request: http.IncomingMessage): Promise<ApiResponse> {
+  const record = await authenticate(request);
+  if (!record) return [401, { error: "unauthorized" }];
+  const body = await safeJson(request);
+  const cosmeticId = typeof body.cosmeticId === "string" ? body.cosmeticId.trim() : "";
+  if (!cosmeticId) return [400, { error: "validation_failed", message: "Missing cosmetic id." }];
+
+  const result = await tx(async (client) => {
+    const user = await getUserForUpdate(client, record.user_id);
+    if (!user) return { status: 404 as const, body: { error: "not_found" } };
+    const cosmetic = await getCosmeticItem(client, cosmeticId);
+    if (!cosmetic) return { status: 404 as const, body: { error: "not_found", message: "That cosmetic is unavailable." } };
+    const entitlements = normalizeEntitlements(user.entitlements);
+    if (!entitlements.allStoreItemsUnlocked && !await ownsCosmetic(client, user.user_id, cosmeticId)) {
+      return { status: 403 as const, body: { error: "not_owned", message: "Unlock this cosmetic before equipping it." } };
+    }
+    if (entitlements.allStoreItemsUnlocked && !await ownsCosmetic(client, user.user_id, cosmeticId)) {
+      await grantCosmetic(client, user.user_id, cosmeticId, "entitlement");
+    }
+    await client.query(
+      `INSERT INTO equipped_cosmetics(user_id, cosmetic_type, cosmetic_id, equipped_at)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (user_id, cosmetic_type)
+       DO UPDATE SET cosmetic_id = EXCLUDED.cosmetic_id, equipped_at = EXCLUDED.equipped_at`,
+      [user.user_id, cosmetic.cosmetic_type, cosmeticId, Date.now()],
+    );
+    return { status: 200 as const, body: { ok: true, cosmetics: await hydrateCosmetics(client, user) } };
+  });
+  return [result.status, result.body];
 }
 
 async function leaderboard(url: URL): Promise<ApiResponse> {
@@ -759,10 +1023,12 @@ async function applyMatchOutcome(client: DbClient, outcome: MatchOutcome): Promi
     return { duplicate: false, stats: ranked };
   }
 
-  const user = await getUser(client, outcome.subjectId);
+  const user = await getUserForUpdate(client, outcome.subjectId);
   if (!user) return null;
   const stats = applyOutcome(await getStats(client, "USER", outcome.subjectId), outcome);
   await putStats(client, "USER", outcome.subjectId, user.username, stats, null);
+  await awardCurrencyForMatch(client, user, outcome);
+  await awardSeasonProgressForMatch(client, user, outcome);
   const rank = await syncLeaderboard(client, "USER", outcome.subjectId, user.username, stats, null);
   const ranked = applyRank(stats, rank);
   await putStats(client, "USER", outcome.subjectId, user.username, ranked, null);
@@ -778,6 +1044,11 @@ async function findUserByIdentifier(db: DbClient, identifier: string): Promise<U
 
 async function getUser(db: DbClient, userId: string): Promise<UserRow | null> {
   const result = await db.query<UserRow>("SELECT * FROM users WHERE user_id = $1", [userId]);
+  return result.rows[0] ?? null;
+}
+
+async function getUserForUpdate(db: DbClient, userId: string): Promise<UserRow | null> {
+  const result = await db.query<UserRow>("SELECT * FROM users WHERE user_id = $1 FOR UPDATE", [userId]);
   return result.rows[0] ?? null;
 }
 
@@ -874,6 +1145,90 @@ async function hydrateFriends(db: DbClient, userId: string): Promise<FriendDto[]
   return friends.sort((a, b) => (weight[a.presence] ?? 2) - (weight[b.presence] ?? 2) || b.totalPoints - a.totalPoints);
 }
 
+async function friendInvitesPayload(db: DbClient, userId: string): Promise<{ incoming: FriendInviteDto[]; outgoing: FriendInviteDto[] }> {
+  const rows = await db.query<FriendInviteRow>(
+    `SELECT fi.invite_id, fi.from_user_id, from_user.username AS from_username,
+            fi.to_user_id, to_user.username AS to_username,
+            fi.status, fi.created_at, fi.responded_at
+     FROM friend_invites fi
+     JOIN users from_user ON from_user.user_id = fi.from_user_id
+     JOIN users to_user ON to_user.user_id = fi.to_user_id
+     WHERE fi.status = 'pending' AND (fi.from_user_id = $1 OR fi.to_user_id = $1)
+     ORDER BY fi.created_at DESC`,
+    [userId],
+  );
+  const incoming: FriendInviteDto[] = [];
+  const outgoing: FriendInviteDto[] = [];
+  for (const row of rows.rows) {
+    if (row.to_user_id === userId) incoming.push(friendInviteDto(row, "incoming"));
+    if (row.from_user_id === userId) outgoing.push(friendInviteDto(row, "outgoing"));
+  }
+  return { incoming, outgoing };
+}
+
+function friendInviteDto(row: FriendInviteRow, direction: FriendInviteDto["direction"]): FriendInviteDto {
+  const otherIsSender = direction === "incoming";
+  return {
+    inviteId: row.invite_id,
+    direction,
+    status: row.status,
+    userId: otherIsSender ? row.from_user_id : row.to_user_id,
+    username: otherIsSender ? row.from_username : row.to_username,
+    createdAt: Number(row.created_at),
+    respondedAt: row.responded_at === null ? null : Number(row.responded_at),
+  };
+}
+
+async function getPendingFriendInvite(db: DbClient, inviteId: string): Promise<FriendInviteRow | null> {
+  const result = await db.query<FriendInviteRow>(
+    `SELECT fi.invite_id, fi.from_user_id, from_user.username AS from_username,
+            fi.to_user_id, to_user.username AS to_username,
+            fi.status, fi.created_at, fi.responded_at
+     FROM friend_invites fi
+     JOIN users from_user ON from_user.user_id = fi.from_user_id
+     JOIN users to_user ON to_user.user_id = fi.to_user_id
+     WHERE fi.invite_id = $1 AND fi.status = 'pending'
+     FOR UPDATE OF fi`,
+    [inviteId],
+  );
+  return result.rows[0] ?? null;
+}
+
+async function acceptFriendInviteInTx(
+  client: DbClient,
+  meRow: UserRow,
+  inviteId: string,
+): Promise<{ status: number; body: unknown }> {
+  const invite = await getPendingFriendInvite(client, inviteId);
+  if (!invite) return { status: 404, body: { error: "not_found", message: "That invite is no longer pending." } };
+  if (invite.to_user_id !== meRow.user_id) {
+    return { status: 403, body: { error: "forbidden", message: "Only the invited player can accept this invite." } };
+  }
+  const count = await client.query<{ count: string }>("SELECT count(*) FROM friendships WHERE user_id = $1", [meRow.user_id]);
+  if (Number(count.rows[0]?.count ?? 0) >= MAX_FRIENDS) {
+    return { status: 409, body: { error: "limit_reached", message: "Your friends list is full." } };
+  }
+  const now = Date.now();
+  await client.query(
+    `INSERT INTO friendships(user_id, friend_user_id, added_at)
+     VALUES ($1, $2, $3), ($2, $1, $3)
+     ON CONFLICT (user_id, friend_user_id) DO NOTHING`,
+    [invite.from_user_id, invite.to_user_id, now],
+  );
+  await client.query(
+    "UPDATE friend_invites SET status = 'accepted', responded_at = $2 WHERE invite_id = $1",
+    [inviteId, now],
+  );
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      profile: await toProfile(client, meRow),
+      ...(await friendInvitesPayload(client, meRow.user_id)),
+    },
+  };
+}
+
 async function getStats(db: DbClient, subjectKind: SubjectKind, subjectId: string): Promise<PlayerStats> {
   const result = await db.query<{ stats: PlayerStats }>(
     "SELECT stats FROM player_stats WHERE subject_kind = $1 AND subject_id = $2",
@@ -934,6 +1289,248 @@ async function syncPowerupInventory(
      DO UPDATE SET charges = EXCLUDED.charges, updated_at = EXCLUDED.updated_at`,
     [subjectKind, subjectId, Math.max(0, charges), Date.now()],
   );
+}
+
+async function getActiveSeason(db: DbClient): Promise<SeasonRow | null> {
+  const now = Date.now();
+  const result = await db.query<SeasonRow>(
+    `SELECT season_id, name, starts_at, ends_at, reward_track
+     FROM seasons
+     WHERE active = true AND starts_at <= $1 AND ends_at > $1
+     ORDER BY starts_at DESC
+     LIMIT 1`,
+    [now],
+  );
+  return result.rows[0] ?? null;
+}
+
+function seasonDto(row: SeasonRow): SeasonDto {
+  return {
+    seasonId: row.season_id,
+    name: row.name,
+    startsAt: Number(row.starts_at),
+    endsAt: Number(row.ends_at),
+    rewardTrack: Array.isArray(row.reward_track) ? row.reward_track : [],
+  };
+}
+
+async function getSeasonProgress(db: DbClient, userId: string, seasonId: string): Promise<SeasonProgressDto> {
+  const result = await db.query<SeasonProgressRow>(
+    `SELECT season_id, xp, level, tickets_earned, updated_at
+     FROM season_progress
+     WHERE user_id = $1 AND season_id = $2`,
+    [userId, seasonId],
+  );
+  const row = result.rows[0];
+  if (!row) return { seasonId, xp: 0, level: 1, ticketsEarned: 0, updatedAt: 0 };
+  return {
+    seasonId: row.season_id,
+    xp: Number(row.xp),
+    level: Number(row.level),
+    ticketsEarned: Number(row.tickets_earned),
+    updatedAt: Number(row.updated_at),
+  };
+}
+
+async function awardSeasonProgressForMatch(client: DbClient, user: UserRow, outcome: MatchOutcome): Promise<void> {
+  const season = await getActiveSeason(client);
+  if (!season) return;
+  const xpGain = Math.max(25, Math.floor(outcome.score / 10) + outcome.correctAnswers * 10 + (outcome.won ? 100 : 0));
+  const previous = await getSeasonProgress(client, user.user_id, season.season_id);
+  const xp = previous.xp + xpGain;
+  const level = Math.max(1, Math.floor(xp / SEASON_XP_PER_LEVEL) + 1);
+  const newLevels = Math.max(0, level - previous.level);
+  const tickets = previous.ticketsEarned + newLevels;
+  await client.query(
+    `INSERT INTO season_progress(user_id, season_id, xp, level, tickets_earned, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (user_id, season_id)
+     DO UPDATE SET xp = EXCLUDED.xp, level = EXCLUDED.level,
+                   tickets_earned = EXCLUDED.tickets_earned, updated_at = EXCLUDED.updated_at`,
+    [user.user_id, season.season_id, xp, level, tickets, Date.now()],
+  );
+  if (newLevels > 0) {
+    const credit = await adjustCurrency(client, user, "seasonalTickets", newLevels, "season_level", `${season.season_id}:${level}`);
+    if (credit.ok) user.currency_balances = credit.balances;
+  }
+}
+
+async function awardCurrencyForMatch(client: DbClient, user: UserRow, outcome: MatchOutcome): Promise<void> {
+  if (normalizeEntitlements(user.entitlements).unlimitedCurrency) return;
+  const coins = Math.max(10, Math.floor(outcome.score / 20) + outcome.correctAnswers * 5 + (outcome.won ? 75 : 0));
+  const gems = outcome.won ? 1 : 0;
+  const coinCredit = await adjustCurrency(client, user, "coins", coins, "match_reward", outcome.matchId);
+  if (coinCredit.ok) user.currency_balances = coinCredit.balances;
+  if (gems > 0) {
+    const gemCredit = await adjustCurrency(client, user, "gems", gems, "match_win", outcome.matchId);
+    if (gemCredit.ok) user.currency_balances = gemCredit.balances;
+  }
+}
+
+async function hydrateStoreItems(db: DbClient, record: UserRow): Promise<StoreItemDto[]> {
+  const rows = await db.query<StoreItemRow>(
+    `SELECT item_id, item_type, display_name, description, currency, price, payload
+     FROM store_items
+     WHERE active = true
+     ORDER BY sort_order, item_id`,
+  );
+  const entitlements = normalizeEntitlements(record.entitlements);
+  const ownedCosmetics = await ownedCosmeticIds(db, record.user_id);
+  return rows.rows.map((row) => {
+    const payload = row.payload ?? {};
+    const cosmeticId = storePayloadString(payload, "cosmeticId");
+    return {
+      itemId: row.item_id,
+      itemType: row.item_type,
+      displayName: row.display_name,
+      description: row.description,
+      currency: row.currency,
+      price: Number(row.price),
+      payload,
+      owned: row.item_type === "COSMETIC"
+        ? Boolean(cosmeticId && (ownedCosmetics.has(cosmeticId) || entitlements.allStoreItemsUnlocked))
+        : row.item_type === "SEASON_PASS" && entitlements.seasonPassAccess,
+    };
+  });
+}
+
+async function getStoreItem(db: DbClient, itemId: string): Promise<StoreItemRow | null> {
+  const result = await db.query<StoreItemRow>(
+    `SELECT item_id, item_type, display_name, description, currency, price, payload
+     FROM store_items
+     WHERE item_id = $1 AND active = true`,
+    [itemId],
+  );
+  return result.rows[0] ?? null;
+}
+
+async function storeStatePayload(
+  db: DbClient,
+  user: UserRow,
+  extra: Record<string, unknown> = {},
+): Promise<Record<string, unknown>> {
+  const fresh = await getUser(db, user.user_id) ?? user;
+  return {
+    ok: true,
+    ...extra,
+    profile: await toProfile(db, fresh),
+    balances: currencyBalancesFor(fresh),
+    items: await hydrateStoreItems(db, fresh),
+    cosmetics: await hydrateCosmetics(db, fresh),
+  };
+}
+
+async function grantStoreItem(client: DbClient, user: UserRow, item: StoreItemRow): Promise<void> {
+  if (item.item_type === "POWERUP_CHARGE") {
+    const charges = clamp(Number(item.payload?.charges ?? 0), 1, 99);
+    const stats = await getStats(client, "USER", user.user_id);
+    await putStats(client, "USER", user.user_id, user.username, {
+      ...stats,
+      powerUpCharges: stats.powerUpCharges + charges,
+    }, null);
+    return;
+  }
+
+  if (item.item_type === "COSMETIC") {
+    const cosmeticId = storePayloadString(item.payload, "cosmeticId");
+    if (!cosmeticId) throw new Error(`store item ${item.item_id} missing cosmeticId`);
+    await grantCosmetic(client, user.user_id, cosmeticId, "store");
+    return;
+  }
+
+  if (item.item_type === "SEASON_PASS") {
+    const entitlements = { ...normalizeEntitlements(user.entitlements), seasonPassAccess: true };
+    await client.query("UPDATE users SET entitlements = $2 WHERE user_id = $1", [user.user_id, JSON.stringify(entitlements)]);
+    user.entitlements = entitlements;
+  }
+}
+
+async function hydrateCosmetics(db: DbClient, record: UserRow): Promise<CosmeticItemDto[]> {
+  const rows = await db.query<CosmeticItemRow>(
+    `SELECT c.cosmetic_id, c.cosmetic_type, c.display_name, c.rarity, c.payload,
+            pc.cosmetic_id IS NOT NULL AS owned,
+            ec.cosmetic_id IS NOT NULL AS equipped
+     FROM cosmetic_items c
+     LEFT JOIN player_cosmetics pc ON pc.user_id = $1 AND pc.cosmetic_id = c.cosmetic_id
+     LEFT JOIN equipped_cosmetics ec ON ec.user_id = $1 AND ec.cosmetic_id = c.cosmetic_id
+     WHERE c.active = true
+     ORDER BY c.sort_order, c.cosmetic_id`,
+    [record.user_id],
+  );
+  const unlockAll = normalizeEntitlements(record.entitlements).allStoreItemsUnlocked;
+  return rows.rows.map((row) => ({
+    cosmeticId: row.cosmetic_id,
+    cosmeticType: row.cosmetic_type,
+    displayName: row.display_name,
+    rarity: row.rarity,
+    payload: row.payload ?? {},
+    owned: unlockAll || row.owned === true,
+    equipped: row.equipped === true,
+  }));
+}
+
+async function getCosmeticItem(db: DbClient, cosmeticId: string): Promise<CosmeticItemRow | null> {
+  const result = await db.query<CosmeticItemRow>(
+    `SELECT cosmetic_id, cosmetic_type, display_name, rarity, payload
+     FROM cosmetic_items
+     WHERE cosmetic_id = $1 AND active = true`,
+    [cosmeticId],
+  );
+  return result.rows[0] ?? null;
+}
+
+async function ownedCosmeticIds(db: DbClient, userId: string): Promise<Set<string>> {
+  const rows = await db.query<{ cosmetic_id: string }>(
+    "SELECT cosmetic_id FROM player_cosmetics WHERE user_id = $1",
+    [userId],
+  );
+  return new Set(rows.rows.map((row) => row.cosmetic_id));
+}
+
+async function ownsCosmetic(db: DbClient, userId: string, cosmeticId: string): Promise<boolean> {
+  const result = await db.query(
+    "SELECT 1 FROM player_cosmetics WHERE user_id = $1 AND cosmetic_id = $2",
+    [userId, cosmeticId],
+  );
+  return result.rowCount !== 0;
+}
+
+async function grantCosmetic(db: DbClient, userId: string, cosmeticId: string, source: string): Promise<void> {
+  await db.query(
+    `INSERT INTO player_cosmetics(user_id, cosmetic_id, source, acquired_at)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT DO NOTHING`,
+    [userId, cosmeticId, source, Date.now()],
+  );
+}
+
+async function adjustCurrency(
+  client: DbClient,
+  user: UserRow,
+  currency: CurrencyKind,
+  delta: number,
+  reason: string,
+  referenceId: string,
+): Promise<{ ok: true; balances: VirtualCurrencyBalances } | { ok: false; balances: VirtualCurrencyBalances }> {
+  const current = normalizeCurrencyBalances(user.currency_balances);
+  const next = { ...current, [currency]: current[currency] + delta };
+  if (next[currency] < 0) return { ok: false, balances: current };
+  await client.query(
+    "UPDATE users SET currency_balances = $2 WHERE user_id = $1",
+    [user.user_id, JSON.stringify(next)],
+  );
+  await client.query(
+    `INSERT INTO currency_ledger(ledger_id, user_id, currency, delta, balance_after, reason, reference_id, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     ON CONFLICT DO NOTHING`,
+    [`cl-${crypto.randomUUID()}`, user.user_id, currency, delta, next[currency], reason, referenceId, Date.now()],
+  );
+  return { ok: true, balances: next };
+}
+
+function storePayloadString(payload: Record<string, unknown> | null, key: string): string | null {
+  const value = payload?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 async function ensureGooglePlayReviewAccount(): Promise<UserRow | null> {
@@ -1313,6 +1910,10 @@ function isUnique(error: unknown, constraint: string): boolean {
 function sanitizeGuestName(raw: unknown): string {
   if (typeof raw !== "string") return "";
   return raw.replace(/[\u0000-\u001F\u007F]/g, "").trim().slice(0, MAX_GUEST_NAME_LENGTH);
+}
+
+function isLegacyAutoGuestDisplayName(displayName: string): boolean {
+  return /^Player\d+$/i.test(displayName.trim());
 }
 
 export async function availableGuestDisplayName(

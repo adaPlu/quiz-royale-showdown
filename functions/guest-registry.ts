@@ -144,6 +144,9 @@ export class GuestRegistry extends DurableObject<DoEnv> {
         existing.lastSeenAt = Date.now();
         existing.expiresAt = existing.lastSeenAt + GUEST_TTL_MS;
         if (requestedName) existing.displayName = await this.availableGuestDisplayName(requestedName, existing.guestId);
+        else if (isLegacyAutoGuestDisplayName(existing.displayName)) {
+          existing.displayName = await this.availableGuestDisplayName("", existing.guestId);
+        }
         await this.ctx.storage.put(key(existingId), existing);
         await this.armSweep();
         return json({ guest: toDto(existing), reused: true });
@@ -413,6 +416,10 @@ async function validGuestSecret(session: GuestSession, secret: string | null): P
 function sanitizeGuestName(raw: unknown): string {
   if (typeof raw !== "string") return "";
   return raw.replace(/[\u0000-\u001F\u007F]/g, "").trim().slice(0, MAX_GUEST_NAME_LENGTH);
+}
+
+function isLegacyAutoGuestDisplayName(displayName: string): boolean {
+  return /^Player\d+$/i.test(displayName.trim());
 }
 
 async function safeJson(request: Request): Promise<Record<string, unknown>> {

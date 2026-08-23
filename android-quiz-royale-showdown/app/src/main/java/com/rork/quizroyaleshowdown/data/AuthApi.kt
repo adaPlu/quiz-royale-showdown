@@ -20,6 +20,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import java.io.IOException
+import java.util.UUID
 
 private const val TAG = "AuthApi"
 
@@ -121,14 +122,14 @@ class AuthApi {
      * Issues a guest id, or renews [existingId] when it is still alive so a
      * returning player keeps their run.
      */
-    suspend fun guestSession(existingId: String?, existingSecret: String?, displayName: String): GuestSession? = runCatching {
+    suspend fun guestSession(existingId: String?, existingSecret: String?, displayName: String?): GuestSession? = runCatching {
         val response = http.post("$base/guest/session") {
             contentType(ContentType.Application.Json)
             setBody(
                 buildJsonObject {
                     if (existingId != null) put("guestId", JsonPrimitive(existingId))
                     if (existingSecret != null) put("guestSecret", JsonPrimitive(existingSecret))
-                    put("displayName", JsonPrimitive(displayName))
+                    if (!displayName.isNullOrBlank()) put("displayName", JsonPrimitive(displayName))
                 }
             )
         }
@@ -211,6 +212,38 @@ class AuthApi {
         null
     }
 
+    suspend fun friendInvites(token: String): FriendInvitesEnvelope? = runCatching {
+        val response = http.get("$base/friends/invites") { header("Authorization", "Bearer $token") }
+        if (!response.status.isSuccess()) return null
+        response.body<FriendInvitesEnvelope>()
+    }.getOrElse {
+        Log.w(TAG, "Friend invites fetch failed: ${it.message}")
+        null
+    }
+
+    suspend fun sendFriendInvite(token: String, username: String): AuthOutcome<FriendInvitesEnvelope> =
+        runOutcomeCall {
+            http.post("$base/friends/invites") {
+                header("Authorization", "Bearer $token")
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject { put("username", JsonPrimitive(username)) })
+            }
+        }
+
+    suspend fun respondFriendInvite(token: String, inviteId: String, action: String): AuthOutcome<FriendInvitesEnvelope> =
+        runOutcomeCall {
+            http.post("$base/friends/invites/respond") {
+                header("Authorization", "Bearer $token")
+                contentType(ContentType.Application.Json)
+                setBody(
+                    buildJsonObject {
+                        put("inviteId", JsonPrimitive(inviteId))
+                        put("action", JsonPrimitive(action))
+                    }
+                )
+            }
+        }
+
     /**
      * Reports that the player is still active and gets the friends list back in
      * the same round trip. Returns null on failure so the caller can keep the
@@ -241,6 +274,56 @@ class AuthApi {
         if (!response.status.isSuccess()) return emptyList()
         response.body<UserSearchResponse>().results
     }.getOrElse { emptyList() }
+
+    suspend fun currentSeason(token: String): CurrentSeasonEnvelope? = runCatching {
+        val response = http.get("$base/seasons/current") { header("Authorization", "Bearer $token") }
+        if (!response.status.isSuccess()) return null
+        response.body<CurrentSeasonEnvelope>()
+    }.getOrElse {
+        Log.w(TAG, "Current season fetch failed: ${it.message}")
+        null
+    }
+
+    suspend fun storeItems(token: String): StoreItemsEnvelope? = runCatching {
+        val response = http.get("$base/store/items") { header("Authorization", "Bearer $token") }
+        if (!response.status.isSuccess()) return null
+        response.body<StoreItemsEnvelope>()
+    }.getOrElse {
+        Log.w(TAG, "Store fetch failed: ${it.message}")
+        null
+    }
+
+    suspend fun purchaseStoreItem(token: String, itemId: String): AuthOutcome<StorePurchaseResult> =
+        runOutcomeCall {
+            http.post("$base/store/purchase") {
+                header("Authorization", "Bearer $token")
+                contentType(ContentType.Application.Json)
+                setBody(
+                    buildJsonObject {
+                        put("itemId", JsonPrimitive(itemId))
+                        put("idempotencyKey", JsonPrimitive(UUID.randomUUID().toString()))
+                    }
+                )
+            }
+        }
+
+    suspend fun cosmetics(token: String): List<CosmeticItem>? = runCatching {
+        val response = http.get("$base/cosmetics") { header("Authorization", "Bearer $token") }
+        if (!response.status.isSuccess()) return null
+        response.body<CosmeticsEnvelope>().cosmetics
+    }.getOrElse {
+        Log.w(TAG, "Cosmetics fetch failed: ${it.message}")
+        null
+    }
+
+    suspend fun equipCosmetic(token: String, cosmeticId: String): AuthOutcome<CosmeticsEnvelope> =
+        runOutcomeCall {
+            http.post("$base/cosmetics/equip") {
+                header("Authorization", "Bearer $token")
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject { put("cosmeticId", JsonPrimitive(cosmeticId)) })
+            }
+        }
 
     // ------------------------------------------------------------- leaderboard
 

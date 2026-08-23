@@ -6,8 +6,10 @@ plugins {
 }
 
 val releaseBuildRequested = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
-fun configuredValue(name: String): String =
-    providers.gradleProperty(name).orElse(providers.environmentVariable(name)).getOrElse("")
+fun configuredValue(name: String, defaultValue: String): String =
+    providers.gradleProperty(name)
+        .orElse(providers.environmentVariable(name))
+        .getOrElse(if (releaseBuildRequested) "" else defaultValue)
 
 fun requireReleaseValue(name: String, value: String) {
     if (releaseBuildRequested && value.isBlank()) {
@@ -18,8 +20,14 @@ fun requireReleaseValue(name: String, value: String) {
 fun String.toBuildConfigLiteral(): String =
     "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
-val railwayApiUrl = configuredValue("EXPO_PUBLIC_RAILWAY_API_URL")
-val rorkFunctionsUrl = configuredValue("EXPO_PUBLIC_RORK_FUNCTIONS_URL")
+val railwayApiUrl = configuredValue(
+    "EXPO_PUBLIC_RAILWAY_API_URL",
+    "https://railway-api-production-5772.up.railway.app"
+)
+val rorkFunctionsUrl = configuredValue(
+    "EXPO_PUBLIC_RORK_FUNCTIONS_URL",
+    "https://quiz-royale-functions.adapluguez.workers.dev"
+)
 requireReleaseValue("EXPO_PUBLIC_RAILWAY_API_URL", railwayApiUrl)
 requireReleaseValue("EXPO_PUBLIC_RORK_FUNCTIONS_URL", rorkFunctionsUrl)
 

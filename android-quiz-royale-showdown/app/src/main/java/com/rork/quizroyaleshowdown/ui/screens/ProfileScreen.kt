@@ -21,7 +21,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.HourglassEmpty
+import androidx.compose.material.icons.filled.PersonAddAlt1
 import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -44,6 +47,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.rork.quizroyaleshowdown.data.AuthViewModel
 import com.rork.quizroyaleshowdown.data.Friend
+import com.rork.quizroyaleshowdown.data.FriendInvite
 import com.rork.quizroyaleshowdown.data.GuestExpiryState
 import com.rork.quizroyaleshowdown.data.Identity
 import com.rork.quizroyaleshowdown.data.PlayerStats
@@ -239,7 +243,7 @@ fun ProfileScreen(
                     Spacer(Modifier.height(10.dp))
 
                     ArenaTextField(
-                        label = "Add by username",
+                        label = "Invite by username",
                         value = friendName,
                         onValueChange = { friendName = it },
                         placeholder = "Their exact username",
@@ -249,20 +253,56 @@ fun ProfileScreen(
                     )
                     Spacer(Modifier.height(10.dp))
                     ArenaOutlineButton(
-                        text = "Add friend",
+                        text = "Send invite",
                         accent = Arena.Cyan,
                         enabled = friendName.isNotBlank() && !state.busy,
                         onClick = {
-                            viewModel.addFriend(friendName)
+                            viewModel.sendFriendInvite(friendName)
                             friendName = ""
                         }
                     )
 
                     Spacer(Modifier.height(14.dp))
 
+                    if (state.incomingInvites.isNotEmpty()) {
+                        SectionHeader("Incoming invites", trailing = state.incomingInvites.size.toString())
+                        Spacer(Modifier.height(8.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            state.incomingInvites.forEach { invite ->
+                                FriendInviteRow(
+                                    invite = invite,
+                                    busy = state.busy,
+                                    primaryLabel = "Accept",
+                                    secondaryLabel = "Decline",
+                                    onPrimary = { viewModel.respondFriendInvite(invite.inviteId, "accept") },
+                                    onSecondary = { viewModel.respondFriendInvite(invite.inviteId, "decline") }
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(14.dp))
+                    }
+
+                    if (state.outgoingInvites.isNotEmpty()) {
+                        SectionHeader("Sent invites", trailing = state.outgoingInvites.size.toString())
+                        Spacer(Modifier.height(8.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            state.outgoingInvites.forEach { invite ->
+                                FriendInviteRow(
+                                    invite = invite,
+                                    busy = state.busy,
+                                    primaryLabel = "Pending",
+                                    secondaryLabel = "Cancel",
+                                    onPrimary = {},
+                                    onSecondary = { viewModel.respondFriendInvite(invite.inviteId, "cancel") }
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(14.dp))
+                    }
+
                     if (friends.isEmpty()) {
                         Text(
-                            text = "No friends yet. Add someone by username to compare records.",
+                            text = "No friends yet. Send an invite by username to compare records.",
                             style = MaterialTheme.typography.bodySmall,
                             color = Arena.TextLow
                         )
@@ -589,6 +629,102 @@ private fun FriendRow(friend: Friend, busy: Boolean, onRemove: () -> Unit) {
                     .size(16.dp)
             )
         }
+    }
+}
+
+@Composable
+private fun FriendInviteRow(
+    invite: FriendInvite,
+    busy: Boolean,
+    primaryLabel: String,
+    secondaryLabel: String,
+    onPrimary: () -> Unit,
+    onSecondary: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(Arena.Surface.copy(alpha = 0.65f))
+            .border(1.dp, Arena.Outline.copy(alpha = 0.6f), RoundedCornerShape(14.dp))
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .clip(RoundedCornerShape(50))
+                .background(Arena.Cyan.copy(alpha = 0.18f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Filled.PersonAddAlt1,
+                contentDescription = null,
+                tint = Arena.Cyan,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = invite.username,
+                style = MaterialTheme.typography.bodyLarge,
+                color = Arena.TextHi,
+                fontWeight = FontWeight.W700
+            )
+            Text(
+                text = if (invite.direction == "incoming") "wants to be friends" else "waiting for response",
+                style = MaterialTheme.typography.bodySmall,
+                color = Arena.TextLow
+            )
+        }
+        if (primaryLabel != "Pending") {
+            InviteIconButton(
+                contentDescription = primaryLabel,
+                accent = Arena.Cyan,
+                enabled = !busy,
+                icon = Icons.Filled.Check,
+                onClick = onPrimary
+            )
+            Spacer(Modifier.width(8.dp))
+        } else {
+            TagChip(text = "pending", color = Arena.TextMid)
+            Spacer(Modifier.width(8.dp))
+        }
+        InviteIconButton(
+            contentDescription = secondaryLabel,
+            accent = Arena.Magenta,
+            enabled = !busy,
+            icon = Icons.Filled.Close,
+            onClick = onSecondary
+        )
+    }
+}
+
+@Composable
+private fun InviteIconButton(
+    contentDescription: String,
+    accent: Color,
+    enabled: Boolean,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit
+) {
+    PressableSurface(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.size(34.dp),
+        background = accent.copy(alpha = 0.12f),
+        borderColor = accent.copy(alpha = 0.4f),
+        shape = RoundedCornerShape(10.dp)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = accent,
+            modifier = Modifier
+                .align(Alignment.Center)
+                .size(16.dp)
+        )
     }
 }
 

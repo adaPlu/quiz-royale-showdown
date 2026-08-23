@@ -28,6 +28,8 @@ export type VirtualCurrencyBalances = {
   seasonalTickets: number;
 };
 
+export type CurrencyKind = keyof VirtualCurrencyBalances;
+
 export type PlayerStats = {
   wins: number;
   losses: number;
@@ -212,6 +214,53 @@ export type UserProfileDto = {
   createdAt: number;
   stats: PlayerStats;
   friends: FriendDto[];
+};
+
+export type FriendInviteDto = {
+  inviteId: string;
+  direction: "incoming" | "outgoing";
+  status: "pending" | "accepted" | "declined" | "canceled";
+  userId: string;
+  username: string;
+  createdAt: number;
+  respondedAt: number | null;
+};
+
+export type SeasonDto = {
+  seasonId: string;
+  name: string;
+  startsAt: number;
+  endsAt: number;
+  rewardTrack: unknown[];
+};
+
+export type SeasonProgressDto = {
+  seasonId: string;
+  xp: number;
+  level: number;
+  ticketsEarned: number;
+  updatedAt: number;
+};
+
+export type CosmeticItemDto = {
+  cosmeticId: string;
+  cosmeticType: "avatar_frame" | "banner" | "title" | "badge";
+  displayName: string;
+  rarity: "common" | "rare" | "epic" | "legendary";
+  payload: Record<string, unknown>;
+  owned: boolean;
+  equipped: boolean;
+};
+
+export type StoreItemDto = {
+  itemId: string;
+  itemType: "POWERUP_CHARGE" | "COSMETIC" | "SEASON_PASS";
+  displayName: string;
+  description: string;
+  currency: CurrencyKind;
+  price: number;
+  payload: Record<string, unknown>;
+  owned: boolean;
 };
 
 export type GuestSessionDto = {

@@ -17,17 +17,23 @@ import com.rork.quizroyaleshowdown.data.AuthViewModel
 import com.rork.quizroyaleshowdown.data.GameMode
 import com.rork.quizroyaleshowdown.data.LeaderboardViewModel
 import com.rork.quizroyaleshowdown.data.MatchViewModel
+import com.rork.quizroyaleshowdown.data.SeasonViewModel
+import com.rork.quizroyaleshowdown.data.StoreViewModel
 import com.rork.quizroyaleshowdown.ui.screens.AuthMode
 import com.rork.quizroyaleshowdown.ui.screens.AuthScreen
 import com.rork.quizroyaleshowdown.ui.screens.HomeScreen
 import com.rork.quizroyaleshowdown.ui.screens.LeaderboardScreen
 import com.rork.quizroyaleshowdown.ui.screens.MatchScreen
 import com.rork.quizroyaleshowdown.ui.screens.ProfileScreen
+import com.rork.quizroyaleshowdown.ui.screens.SeasonScreen
+import com.rork.quizroyaleshowdown.ui.screens.StoreScreen
 
 private const val ROUTE_HOME = "home"
 private const val ROUTE_AUTH = "auth/{mode}"
 private const val ROUTE_PROFILE = "profile"
 private const val ROUTE_LEADERBOARD = "leaderboard"
+private const val ROUTE_STORE = "store"
+private const val ROUTE_SEASON = "season"
 private const val ROUTE_MATCH = "match/{mode}"
 
 @Composable
@@ -71,6 +77,8 @@ fun AppNavigation() {
                     onRegister = { navController.navigate("auth/${AuthMode.REGISTER.name}") },
                     onSignIn = { navController.navigate("auth/${AuthMode.LOGIN.name}") },
                     onLeaderboard = { navController.navigate(ROUTE_LEADERBOARD) },
+                    onStore = { navController.navigate(ROUTE_STORE) },
+                    onSeason = { navController.navigate(ROUTE_SEASON) },
                     onProfile = { navController.navigate(ROUTE_PROFILE) }
                 )
             }
@@ -106,6 +114,24 @@ fun AppNavigation() {
                 LeaderboardScreen(
                     viewModel = leaderboardViewModel,
                     onBack = { navController.popBackStack() }
+                )
+            }
+
+            composable(ROUTE_STORE) {
+                val storeViewModel: StoreViewModel = viewModel()
+                StoreScreen(
+                    viewModel = storeViewModel,
+                    onBack = { navController.popBackStack() },
+                    onRegister = { navController.navigate("auth/${AuthMode.REGISTER.name}") }
+                )
+            }
+
+            composable(ROUTE_SEASON) {
+                val seasonViewModel: SeasonViewModel = viewModel()
+                SeasonScreen(
+                    viewModel = seasonViewModel,
+                    onBack = { navController.popBackStack() },
+                    onRegister = { navController.navigate("auth/${AuthMode.REGISTER.name}") }
                 )
             }
 

@@ -66,7 +66,9 @@ data class AuthUiState(
     /** True once we know who the player is, so the UI can stop showing a spinner. */
     val bootstrapped: Boolean = false,
     /** Friends with live presence. Kept beside the profile so pings can refresh it. */
-    val friends: List<Friend> = emptyList()
+    val friends: List<Friend> = emptyList(),
+    val incomingInvites: List<FriendInvite> = emptyList(),
+    val outgoingInvites: List<FriendInvite> = emptyList()
 )
 
 /**
@@ -196,7 +198,7 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Issues or renews the temporary guest id and starts the keep-alive loop. */
     private suspend fun ensureGuestSession() {
-        val session = api.guestSession(prefs.guestId, prefs.guestSecret, prefs.playerName)
+        val session = api.guestSession(prefs.guestId, prefs.guestSecret, prefs.preferredGuestDisplayName())
         if (session == null) {
             _uiState.update {
                 it.copy(error = "Can't reach the arena. Check your connection.")
@@ -205,7 +207,13 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         }
         val adopted = rememberGuestSession(session)
         _uiState.update {
-            it.copy(identity = Identity.Guest(adopted), friends = emptyList(), error = null)
+            it.copy(
+                identity = Identity.Guest(adopted),
+                friends = emptyList(),
+                incomingInvites = emptyList(),
+                outgoingInvites = emptyList(),
+                error = null
+            )
         }
         publishExpiry(adopted.expiresAt)
         // Loops belong to the foreground only; starting them here unconditionally
@@ -366,6 +374,11 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
             api.friends(token)?.let { friends ->
                 _uiState.update { it.copy(friends = friends) }
             }
+            api.friendInvites(token)?.let { invites ->
+                _uiState.update {
+                    it.copy(incomingInvites = invites.incoming, outgoingInvites = invites.outgoing)
+                }
+            }
         }
     }
 
@@ -513,11 +526,18 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
     fun logout() {
         val token = prefs.sessionToken
         prefs.sessionToken = null
+        prefs.clearGuestDisplayName()
         presenceJob?.cancel()
         presenceJob = null
         inMatchMode = null
         _uiState.update {
-            it.copy(identity = Identity.Unknown, friends = emptyList(), notice = "Signed out.")
+            it.copy(
+                identity = Identity.Unknown,
+                friends = emptyList(),
+                incomingInvites = emptyList(),
+                outgoingInvites = emptyList(),
+                notice = "Signed out."
+            )
         }
 
         viewModelScope.launch {
@@ -586,6 +606,66 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun sendFriendInvite(username: String) {
+        val token = prefs.sessionToken ?: return
+        if (_uiState.value.busy) return
+        _uiState.update { it.copy(busy = true, error = null, notice = null) }
+
+        viewModelScope.launch {
+            when (val outcome = api.sendFriendInvite(token, username.trim())) {
+                is AuthOutcome.Ok -> _uiState.update {
+                    it.copy(
+                        busy = false,
+                        incomingInvites = outcome.value.incoming,
+                        outgoingInvites = outcome.value.outgoing,
+                        notice = "Invite sent to $username."
+                    )
+                }
+
+                is AuthOutcome.Invalid -> _uiState.update {
+                    it.copy(busy = false, error = outcome.message ?: "Could not send that invite.")
+                }
+
+                is AuthOutcome.Failed -> _uiState.update {
+                    it.copy(busy = false, error = outcome.message)
+                }
+            }
+            refreshFriends()
+        }
+    }
+
+    fun respondFriendInvite(inviteId: String, action: String) {
+        val token = prefs.sessionToken ?: return
+        if (_uiState.value.busy) return
+        _uiState.update { it.copy(busy = true, error = null, notice = null) }
+
+        viewModelScope.launch {
+            when (val outcome = api.respondFriendInvite(token, inviteId, action)) {
+                is AuthOutcome.Ok -> _uiState.update {
+                    it.copy(
+                        busy = false,
+                        incomingInvites = outcome.value.incoming,
+                        outgoingInvites = outcome.value.outgoing,
+                        notice = when (action) {
+                            "accept" -> "Invite accepted."
+                            "decline" -> "Invite declined."
+                            else -> "Invite canceled."
+                        }
+                    )
+                }
+
+                is AuthOutcome.Invalid -> _uiState.update {
+                    it.copy(busy = false, error = outcome.message ?: "Could not update that invite.")
+                }
+
+                is AuthOutcome.Failed -> _uiState.update {
+                    it.copy(busy = false, error = outcome.message)
+                }
+            }
+            refreshFriends()
+        }
+    }
+
     // ------------------------------------------------------------------ profile
 
     /** Re-reads stats from the server. Called after a match settles. */
@@ -627,7 +707,7 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
     fun renameGuest(name: String) {
         val trimmed = name.trim().take(16)
         if (trimmed.isBlank()) return
-        prefs.playerName = trimmed
+        prefs.rememberGuestDisplayName(trimmed, userChosen = true)
         noteActivity()
 
         val current = _uiState.value.identity
@@ -638,7 +718,7 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val secret = current.session.guestSecret ?: prefs.guestSecret
             api.guestSession(current.session.guestId, secret, trimmed)?.let { session ->
-                val adopted = rememberGuestSession(session, secret)
+                val adopted = rememberGuestSession(session, secret, userChosenGuestName = true)
                 _uiState.update { it.copy(identity = Identity.Guest(adopted)) }
                 publishExpiry(adopted.expiresAt)
             }
@@ -657,10 +737,15 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         api.shutdown()
     }
 
-    private fun rememberGuestSession(session: GuestSession, fallbackSecret: String? = prefs.guestSecret): GuestSession {
+    private fun rememberGuestSession(
+        session: GuestSession,
+        fallbackSecret: String? = prefs.guestSecret,
+        userChosenGuestName: Boolean = false
+    ): GuestSession {
         val secret = session.guestSecret ?: fallbackSecret
         prefs.guestId = session.guestId
         prefs.guestSecret = secret
+        prefs.rememberGuestDisplayName(session.displayName, userChosen = userChosenGuestName)
         return session.copy(guestSecret = secret)
     }
 }

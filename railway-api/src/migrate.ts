@@ -24,6 +24,15 @@ const managedTables = new Set([
   "question_usage_events",
   "question_usage_rollups",
   "question_generation_jobs",
+  "friend_invites",
+  "seasons",
+  "season_progress",
+  "currency_ledger",
+  "cosmetic_items",
+  "store_items",
+  "player_cosmetics",
+  "equipped_cosmetics",
+  "store_purchases",
 ]);
 
 async function main(): Promise<void> {

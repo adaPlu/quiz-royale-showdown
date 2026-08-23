@@ -21,8 +21,16 @@ test("protected user routes deny unauthenticated callers", async () => {
       ["GET", "/friends"],
       ["POST", "/friends/add"],
       ["POST", "/friends/remove"],
+      ["GET", "/friends/invites"],
+      ["POST", "/friends/invites"],
+      ["POST", "/friends/invites/respond"],
       ["POST", "/presence/ping"],
       ["GET", "/users/search?q=al"],
+      ["GET", "/seasons/current"],
+      ["GET", "/store/items"],
+      ["POST", "/store/purchase"],
+      ["GET", "/cosmetics"],
+      ["POST", "/cosmetics/equip"],
     ] as const) {
       const response = await request(route[0], route[1], { body: route[0] === "POST" ? {} : undefined });
       assert.equal(response.status, 401, `${route[0]} ${route[1]} should require authentication`);

@@ -36,10 +36,34 @@ class PlayerPrefs(context: Context) {
         }
 
     var playerName: String
-        get() = prefs.getString(KEY_NAME, null)?.takeIf { it.isNotBlank() } ?: defaultName()
+        get() = storedPlayerName ?: DEFAULT_GUEST_DISPLAY_NAME
         set(value) {
             prefs.edit().putString(KEY_NAME, value.trim().take(16)).apply()
         }
+
+    private val storedPlayerName: String?
+        get() = prefs.getString(KEY_NAME, null)?.trim()?.takeIf { it.isNotBlank() }
+
+    fun preferredGuestDisplayName(): String? {
+        val stored = storedPlayerName ?: return null
+        if (!guestNameUserChosen && isLegacyAutoGuestName(stored)) return null
+        if (!guestNameUserChosen && stored == DEFAULT_GUEST_DISPLAY_NAME) return null
+        return stored
+    }
+
+    fun rememberGuestDisplayName(displayName: String, userChosen: Boolean = guestNameUserChosen) {
+        prefs.edit()
+            .putString(KEY_NAME, displayName.trim().take(16))
+            .putBoolean(KEY_GUEST_NAME_USER_CHOSEN, userChosen)
+            .apply()
+    }
+
+    fun clearGuestDisplayName() {
+        prefs.edit()
+            .remove(KEY_NAME)
+            .remove(KEY_GUEST_NAME_USER_CHOSEN)
+            .apply()
+    }
 
     /** Opaque bearer token for a registered session. Null when playing as guest. */
     var sessionToken: String?
@@ -83,7 +107,11 @@ class PlayerPrefs(context: Context) {
         get() = prefs.getInt(KEY_WINS, 0)
         set(value) = prefs.edit().putInt(KEY_WINS, value).apply()
 
-    private fun defaultName(): String = "Player${(1000..9999).random()}"
+    private val guestNameUserChosen: Boolean
+        get() = prefs.getBoolean(KEY_GUEST_NAME_USER_CHOSEN, false)
+
+    private fun isLegacyAutoGuestName(value: String): Boolean =
+        LEGACY_AUTO_GUEST_NAME.matches(value)
 
     private fun migratePlaintextSessionToken() {
         val oldToken = prefs.getString(KEY_TOKEN, null)?.takeIf { it.isNotBlank() }
@@ -124,8 +152,11 @@ class PlayerPrefs(context: Context) {
         const val KEY_TOKEN = "session_token"
         const val KEY_GUEST_ID = "guest_id"
         const val KEY_GUEST_SECRET = "guest_secret"
+        const val KEY_GUEST_NAME_USER_CHOSEN = "guest_name_user_chosen"
         const val KEY_BEST_PLACE = "best_placement"
         const val KEY_BEST_SCORE = "best_score"
         const val KEY_WINS = "wins"
+        const val DEFAULT_GUEST_DISPLAY_NAME = "Challenger"
+        val LEGACY_AUTO_GUEST_NAME = Regex("^Player\\d+$", RegexOption.IGNORE_CASE)
     }
 }
