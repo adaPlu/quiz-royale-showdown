@@ -1,5 +1,6 @@
 import http from "node:http";
-import { URL } from "node:url";
+import { createHash, timingSafeEqual } from "node:crypto";
+import { URL, pathToFileURL } from "node:url";
 import { z } from "zod";
 import { pool, tx, type DbClient } from "./db.js";
 import {
@@ -113,7 +114,11 @@ const matchOutcomeSchema = z.object({
   recordWinLoss: z.boolean(),
 });
 
-const server = http.createServer(async (request, response) => {
+export function createQuizRoyaleApiServer(): http.Server {
+  return http.createServer(handleRequest);
+}
+
+export async function handleRequest(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
   try {
     if (request.method === "OPTIONS") return send(response, 204, null);
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
@@ -162,12 +167,22 @@ const server = http.createServer(async (request, response) => {
     console.error("request failed", request.method, request.url, (error as Error)?.message);
     return send(response, 500, { error: "internal_error", message: "Something went wrong." });
   }
-});
+}
 
-start().catch((error) => {
-  console.error("startup failed", (error as Error)?.message);
-  process.exitCode = 1;
-});
+export const server = createQuizRoyaleApiServer();
+
+if (isMainModule()) {
+  start().catch((error) => {
+    console.error("startup failed", (error as Error)?.message);
+    process.exitCode = 1;
+  });
+
+  process.on("SIGTERM", () => {
+    server.close(() => {
+      Promise.all([pool.end(), closeCache()]).finally(() => process.exit(0));
+    });
+  });
+}
 
 async function start(): Promise<void> {
   await ensureGooglePlayReviewAccount();
@@ -1176,7 +1191,15 @@ async function sendPasswordResetEmail(record: UserRow, token: string): Promise<v
 function authorizedInternal(request: http.IncomingMessage): boolean {
   const expected = process.env.INTERNAL_API_TOKEN;
   if (!expected) return false;
-  return request.headers["x-internal-token"] === expected;
+  const provided = request.headers["x-internal-token"];
+  if (typeof provided !== "string") return false;
+  return constantTimeSecretEqual(provided, expected);
+}
+
+export function constantTimeSecretEqual(provided: string, expected: string): boolean {
+  const providedDigest = createHash("sha256").update(provided).digest();
+  const expectedDigest = createHash("sha256").update(expected).digest();
+  return timingSafeEqual(providedDigest, expectedDigest);
 }
 
 function bearer(request: http.IncomingMessage): string | null {
@@ -1292,7 +1315,7 @@ function sanitizeGuestName(raw: unknown): string {
   return raw.replace(/[\u0000-\u001F\u007F]/g, "").trim().slice(0, MAX_GUEST_NAME_LENGTH);
 }
 
-async function availableGuestDisplayName(
+export async function availableGuestDisplayName(
   db: DbClient,
   preferredName: string,
   excludeGuestId: string | null = null,
@@ -1302,23 +1325,32 @@ async function availableGuestDisplayName(
   const seed = preferredName ? base : `${DEFAULT_GUEST_NAME_BASE}00`;
   const start = preferredName ? 0 : 1;
 
-  for (let offset = 0; offset < 1_000; offset += 1) {
+  for (let offset = 0; offset < 100_000; offset += 1) {
     const candidate = incrementGuestName(seed, start + offset);
-    const existing = await db.query(
-      `SELECT 1 FROM guests
-       WHERE expires_at > $1
-         AND lower(display_name) = lower($2)
-         AND ($3::text IS NULL OR guest_id <> $3)
-       LIMIT 1`,
-      [Date.now(), candidate, excludeGuestId],
-    );
-    if (existing.rowCount === 0) return candidate;
+    if (!await guestDisplayNameTaken(db, candidate, excludeGuestId)) return candidate;
   }
 
-  return `${DEFAULT_GUEST_NAME_BASE}${crypto.randomUUID().slice(0, 4)}`.slice(0, MAX_GUEST_NAME_LENGTH);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const candidate = `${DEFAULT_GUEST_NAME_BASE}${crypto.randomUUID().slice(0, 6)}`.slice(0, MAX_GUEST_NAME_LENGTH);
+    if (!await guestDisplayNameTaken(db, candidate, excludeGuestId)) return candidate;
+  }
+
+  throw new Error("unable to allocate a unique guest display name");
 }
 
-function incrementGuestName(base: string, increment: number): string {
+async function guestDisplayNameTaken(db: DbClient, candidate: string, excludeGuestId: string | null): Promise<boolean> {
+  const existing = await db.query(
+    `SELECT 1 FROM guests
+     WHERE expires_at > $1
+       AND lower(display_name) = lower($2)
+       AND ($3::text IS NULL OR guest_id <> $3)
+     LIMIT 1`,
+    [Date.now(), candidate, excludeGuestId],
+  );
+  return existing.rowCount !== 0;
+}
+
+export function incrementGuestName(base: string, increment: number): string {
   if (increment <= 0) return base.slice(0, MAX_GUEST_NAME_LENGTH);
   const match = base.match(/^(.*?)(\d+)$/);
   const suffix = match
@@ -1337,8 +1369,6 @@ function resetLink(base: string | undefined, token: string): string {
   return `${root}${root.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
 }
 
-process.on("SIGTERM", () => {
-  server.close(() => {
-    Promise.all([pool.end(), closeCache()]).finally(() => process.exit(0));
-  });
-});
+function isMainModule(): boolean {
+  return Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1]!).href;
+}

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run typecheck",
+    "test": "node --test --experimental-strip-types *.test.ts && npm run typecheck",
     "deploy": "wrangler deploy --config wrangler.toml"
   },
   "dependencies": {},

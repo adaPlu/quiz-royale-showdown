@@ -31,6 +31,7 @@ import {
 } from "./identity";
 import { mintSessionToken, sha256Hex } from "./auth-core";
 import { callDo, callDoJson, LEADERBOARD_ID, type DoEnv } from "./do-dispatch";
+import { DEFAULT_GUEST_NAME_BASE, incrementGuestName, MAX_GUEST_NAME_LENGTH } from "./guest-names";
 import { enforceRateLimit, type RateLimitOptions } from "./rate-limit";
 
 /**
@@ -52,8 +53,6 @@ type GuestSession = {
 const SLOT_POOL_KEY = "free-slots";
 const NEXT_SLOT_KEY = "next-slot";
 const MAX_POOLED_SLOTS = 5_000;
-const DEFAULT_GUEST_NAME_BASE = "Challenger";
-const MAX_GUEST_NAME_LENGTH = 16;
 const GUEST_SESSION_RATE_LIMIT: RateLimitOptions = { max: 30, windowMs: 10 * 60 * 1000 };
 const GUEST_LIFECYCLE_RATE_LIMIT: RateLimitOptions = { max: 240, windowMs: 10 * 60 * 1000 };
 
@@ -101,20 +100,31 @@ export class GuestRegistry extends DurableObject<DoEnv> {
     const seed = preferredName ? base : `${DEFAULT_GUEST_NAME_BASE}00`;
     const start = preferredName ? 0 : 1;
 
-    for (let offset = 0; offset < 1_000; offset += 1) {
+    for (let offset = 0; offset < 100_000; offset += 1) {
       const candidate = incrementGuestName(seed, start + offset);
       if (!await this.guestDisplayNameTaken(candidate, excludeGuestId)) return candidate;
     }
 
-    return `${DEFAULT_GUEST_NAME_BASE}${crypto.randomUUID().slice(0, 4)}`.slice(0, MAX_GUEST_NAME_LENGTH);
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const candidate = `${DEFAULT_GUEST_NAME_BASE}${crypto.randomUUID().slice(0, 6)}`.slice(0, MAX_GUEST_NAME_LENGTH);
+      if (!await this.guestDisplayNameTaken(candidate, excludeGuestId)) return candidate;
+    }
+
+    throw new Error("unable to allocate a unique guest display name");
   }
 
   private async guestDisplayNameTaken(candidate: string, excludeGuestId?: string): Promise<boolean> {
-    const sessions = await this.ctx.storage.list<GuestSession>({ prefix: "guest:", limit: 1_000 });
-    for (const session of sessions.values()) {
-      if (session.guestId === excludeGuestId || session.expiresAt <= Date.now()) continue;
-      if (session.displayName.toLowerCase() === candidate.toLowerCase()) return true;
-    }
+    let startAfter: string | undefined;
+    do {
+      const sessions = await this.ctx.storage.list<GuestSession>({ prefix: "guest:", limit: 1_000, startAfter });
+      startAfter = undefined;
+      for (const [key, session] of sessions) {
+        startAfter = key;
+        if (session.guestId === excludeGuestId || session.expiresAt <= Date.now()) continue;
+        if (session.displayName.toLowerCase() === candidate.toLowerCase()) return true;
+      }
+    } while (startAfter);
+
     return false;
   }
 
@@ -403,16 +413,6 @@ async function validGuestSecret(session: GuestSession, secret: string | null): P
 function sanitizeGuestName(raw: unknown): string {
   if (typeof raw !== "string") return "";
   return raw.replace(/[\u0000-\u001F\u007F]/g, "").trim().slice(0, MAX_GUEST_NAME_LENGTH);
-}
-
-function incrementGuestName(base: string, increment: number): string {
-  if (increment <= 0) return base.slice(0, MAX_GUEST_NAME_LENGTH);
-  const match = base.match(/^(.*?)(\d+)$/);
-  const suffix = match
-    ? String(Number.parseInt(match[2]!, 10) + increment).padStart(match[2]!.length, "0")
-    : String(increment).padStart(2, "0");
-  const prefix = (match?.[1] ?? base).slice(0, Math.max(0, MAX_GUEST_NAME_LENGTH - suffix.length));
-  return `${prefix}${suffix}`;
 }
 
 async function safeJson(request: Request): Promise<Record<string, unknown>> {

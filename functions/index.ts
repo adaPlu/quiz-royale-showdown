@@ -50,6 +50,7 @@ import {
 import { MODE_CONFIG, type GameMode } from "./protocol";
 import type { GuestSessionDto, SubjectKind } from "./identity";
 import { callRailwayJson } from "./railway-api";
+import { buildMatchRoomTargetUrl } from "./match-routing";
 import { mintRoomTicket, verifyRoomTicket } from "./room-ticket";
 
 type Env = DoEnv;
@@ -190,18 +191,10 @@ async function handleMatchSocket(
     });
   }
 
-  // Rebuild the query from scratch so nothing the client sent can leak through
-  // into the trusted fields the room reads.
-  const target = new URL(url.toString());
-  target.search = "";
-  target.searchParams.set("playerId", identity.subjectId);
-  target.searchParams.set("name", identity.displayName);
-  target.searchParams.set("kind", identity.kind);
-  target.searchParams.set("mode", mode);
-  target.searchParams.set("powerUpCharges", String(identity.powerUpCharges));
+  const target = buildMatchRoomTargetUrl(url.toString(), roomId, mode, identity);
 
   // 2-arg form: the 1-arg form silently drops the Upgrade header.
-  return dispatchToDo(env, "MatchRoom", roomId, new Request(target.toString(), request));
+  return dispatchToDo(env, "MatchRoom", roomId, new Request(target, request));
 }
 
 /**

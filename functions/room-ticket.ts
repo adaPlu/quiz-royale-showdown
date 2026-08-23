@@ -43,7 +43,15 @@ export async function verifyRoomTicket(
 }
 
 function ticketSecret(env: DoEnv): string | null {
-  return env.MATCH_ROOM_TICKET_SECRET?.trim() || env.RAILWAY_INTERNAL_TOKEN?.trim() || null;
+  const explicit = env.MATCH_ROOM_TICKET_SECRET?.trim();
+  if (explicit) return explicit;
+  if (isProduction(env)) return null;
+  return env.RAILWAY_INTERNAL_TOKEN?.trim() || null;
+}
+
+function isProduction(env: DoEnv): boolean {
+  return [env.ENVIRONMENT, env.NODE_ENV, env.APP_ENV]
+    .some((value) => value?.trim().toLowerCase() === "production");
 }
 
 async function sign(secret: string, payload: string): Promise<string> {

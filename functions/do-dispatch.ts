@@ -23,6 +23,9 @@ export type DoEnv = {
   GOOGLE_PLAY_REVIEW_EMAIL?: string;
   GOOGLE_PLAY_REVIEW_USERNAME?: string;
   GOOGLE_PLAY_REVIEW_PASSWORD?: string;
+  ENVIRONMENT?: string;
+  NODE_ENV?: string;
+  APP_ENV?: string;
   MATCH_ROOM_TICKET_SECRET?: string;
   RAILWAY_API_URL?: string;
   RAILWAY_INTERNAL_TOKEN?: string;
