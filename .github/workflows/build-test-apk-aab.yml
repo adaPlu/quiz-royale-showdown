@@ -1,0 +1,49 @@
+name: Build Test APK and AAB
+
+on:
+  pull_request:
+    branches:
+      - Railway-API-Implementation
+  push:
+    branches:
+      - agent/build-test-apk-aab-v1-1
+
+permissions:
+  contents: read
+
+jobs:
+  build-android-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
+        working-directory: android-quiz-royale-showdown
+
+      - name: Build debug APK and AAB
+        run: ./gradlew :app:assembleDebug :app:bundleDebug --no-daemon
+        working-directory: android-quiz-royale-showdown
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: quiz-royale-v1.1-code2-apk
+          path: android-quiz-royale-showdown/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Upload AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: quiz-royale-v1.1-code2-aab
+          path: android-quiz-royale-showdown/app/build/outputs/bundle/debug/app-debug.aab
+          if-no-files-found: error
