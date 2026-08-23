@@ -53,6 +53,7 @@ import {
   type VirtualCurrencyBalances,
 } from "./identity";
 import { callDo, callDoJson, GUEST_REGISTRY_ID, LEADERBOARD_ID, type DoEnv } from "./do-dispatch";
+import { enforceRateLimit, type RateLimitOptions } from "./rate-limit";
 
 type UserRecord = {
   userId: string;
@@ -85,6 +86,9 @@ type PasswordResetRecord = {
 
 const MAX_FRIENDS = 200;
 const PASSWORD_RESET_TTL_MS = 30 * 60 * 1000;
+const AUTH_RATE_LIMIT: RateLimitOptions = { max: 20, windowMs: 10 * 60 * 1000 };
+const PASSWORD_RESET_RATE_LIMIT: RateLimitOptions = { max: 10, windowMs: 10 * 60 * 1000 };
+const USER_SEARCH_RATE_LIMIT: RateLimitOptions = { max: 60, windowMs: 60 * 1000 };
 
 /** Presence lives under its own key so a check-in never rewrites the account. */
 function presenceKey(userId: string): string {
@@ -103,15 +107,15 @@ export class UserDirectory extends DurableObject<DoEnv> {
 
       switch (`${request.method} ${path}`) {
         case "POST /auth/register":
-          return await this.register(request);
+          return await this.rateLimited(request, "auth-register", AUTH_RATE_LIMIT, () => this.register(request));
         case "POST /auth/login":
-          return await this.login(request);
+          return await this.rateLimited(request, "auth-login", AUTH_RATE_LIMIT, () => this.login(request));
         case "POST /auth/logout":
           return await this.logout(request);
         case "POST /auth/forgot-password":
-          return await this.forgotPassword(request);
+          return await this.rateLimited(request, "auth-forgot-password", PASSWORD_RESET_RATE_LIMIT, () => this.forgotPassword(request));
         case "POST /auth/reset-password":
-          return await this.resetPassword(request);
+          return await this.rateLimited(request, "auth-reset-password", PASSWORD_RESET_RATE_LIMIT, () => this.resetPassword(request));
         case "GET /auth/me":
           return await this.me(request);
         case "GET /auth/resolve":
@@ -121,7 +125,7 @@ export class UserDirectory extends DurableObject<DoEnv> {
         case "POST /friends/remove":
           return await this.removeFriend(request);
         case "GET /users/search":
-          return await this.searchUsers(url);
+          return await this.rateLimited(request, "user-search", USER_SEARCH_RATE_LIMIT, () => this.searchUsers(request, url));
         case "GET /friends":
           return await this.listFriends(request);
         case "POST /presence/ping":
@@ -141,6 +145,16 @@ export class UserDirectory extends DurableObject<DoEnv> {
   }
 
   // ------------------------------------------------------------- registration
+
+  private async rateLimited(
+    request: Request,
+    action: string,
+    options: RateLimitOptions,
+    work: () => Promise<Response>,
+  ): Promise<Response> {
+    const limited = await enforceRateLimit(this.ctx, request, action, options);
+    return limited ?? await work();
+  }
 
   private async register(request: Request): Promise<Response> {
     const body = await safeJson(request);
@@ -476,11 +490,8 @@ export class UserDirectory extends DurableObject<DoEnv> {
     const me = await this.authenticate(request);
     if (!me) return json({ error: "unauthorized" }, 401);
 
-    const body = await safeJson(request);
-    const inMatch = body.status === "IN_MATCH";
-    const mode = typeof body.matchMode === "string" ? body.matchMode.slice(0, 16) : null;
-
-    await this.touchPresence(me.userId, inMatch ? { matchMode: mode } : null);
+    await safeJson(request);
+    await this.touchPresence(me.userId, null);
     return json({ ok: true, friends: await this.hydrateFriends(me) });
   }
 
@@ -528,7 +539,10 @@ export class UserDirectory extends DurableObject<DoEnv> {
     } satisfies PresenceRecord);
   }
 
-  private async searchUsers(url: URL): Promise<Response> {
+  private async searchUsers(request: Request, url: URL): Promise<Response> {
+    const me = await this.authenticate(request);
+    if (!me) return json({ error: "unauthorized" }, 401);
+
     const q = (url.searchParams.get("q") ?? "").trim().toLowerCase();
     if (q.length < 2) return json({ results: [] });
 
@@ -618,7 +632,13 @@ export class UserDirectory extends DurableObject<DoEnv> {
 
     const email = (this.env.GOOGLE_PLAY_REVIEW_EMAIL ?? GOOGLE_PLAY_REVIEW_EMAIL).trim().toLowerCase();
     const username = (this.env.GOOGLE_PLAY_REVIEW_USERNAME ?? GOOGLE_PLAY_REVIEW_USERNAME).trim();
-    const passwordHash = await hashPassword(this.env.GOOGLE_PLAY_REVIEW_PASSWORD ?? "Test?Test.");
+    const password = this.env.GOOGLE_PLAY_REVIEW_PASSWORD?.trim();
+    if (!password) {
+      this.reviewAccountSeeded = true;
+      console.warn("GOOGLE_PLAY_REVIEW_PASSWORD is not set; reviewer account provisioning skipped.");
+      return;
+    }
+    const passwordHash = await hashPassword(password);
     const entitlements = reviewAccountEntitlements();
     const currencyBalances = reviewAccountCurrencyBalances();
     const now = Date.now();

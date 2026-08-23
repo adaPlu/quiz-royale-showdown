@@ -95,7 +95,7 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
     private var lastActivityAt = System.currentTimeMillis()
     /** Guards against re-issuing a guest id repeatedly once one has lapsed. */
     private var handlingLapse = false
-    /** Set while a match is on screen, so presence reads IN_MATCH. */
+    /** Set while a match is on screen so foreground presence keeps polling. */
     private var inMatchMode: String? = null
 
     val identity: Identity get() = _uiState.value.identity
@@ -148,7 +148,7 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         lastActivityAt = System.currentTimeMillis()
     }
 
-    /** Marks the player as in a match so friends see it, or clears the claim. */
+    /** Tracks match-screen visibility; the match room owns IN_MATCH presence. */
     fun setInMatch(mode: GameMode?) {
         inMatchMode = mode?.name
         noteActivity()
@@ -346,8 +346,8 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
                 val token = prefs.sessionToken
                 if (token == null) return@launch
 
-                // A match keeps you visible as playing even while the ping loop
-                // sees no taps, so IN_MATCH is reported regardless of idleness.
+                // A match screen keeps the presence poll alive even when no taps
+                // occur; the match room is the only authoritative IN_MATCH writer.
                 val idleFor = System.currentTimeMillis() - lastActivityAt
                 if (inMatchMode != null || idleFor <= ACTIVITY_WINDOW_MS) {
                     api.presencePing(token, inMatchMode)?.let { friends ->

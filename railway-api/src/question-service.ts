@@ -3,6 +3,7 @@ import { z } from "zod";
 import { deleteKey, deletePattern, getJson, setJson, withRedisLock } from "./cache.js";
 import { CATEGORIES } from "./categories.js";
 import { pool, tx, type DbClient } from "./db.js";
+import { postgresConnectionConfig } from "./runtime-config.js";
 import {
   DIFFICULTIES,
   canonicalCategory,
@@ -543,10 +544,12 @@ function shuffle<T>(input: T[]): T[] {
 export async function importQuestionsFromSource(): Promise<{ scanned: number; inserted: number; duplicates: number }> {
   const sourceUrl = process.env.QUESTION_SOURCE_DATABASE_URL;
   if (!sourceUrl) throw new Error("QUESTION_SOURCE_DATABASE_URL is required");
-  const source = new Pool({
-    connectionString: sourceUrl,
-    ssl: process.env.QUESTION_SOURCE_PGSSL === "disable" ? false : { rejectUnauthorized: false },
-  });
+  const source = new Pool(
+    postgresConnectionConfig(process.env, {
+      urlKey: "QUESTION_SOURCE_DATABASE_URL",
+      modeKey: "QUESTION_SOURCE_PGSSL",
+    }),
+  );
   try {
     const rows = await source.query("SELECT * FROM questions");
     const records = rows.rows

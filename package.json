@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "scripts": {
+    "build": "npm run build --prefix railway-api",
+    "start": "npm start --prefix railway-api",
+    "test": "npm test --prefix railway-api"
+  }
+}

@@ -45,10 +45,9 @@ class GameClient {
     private val baseUrl: String get() = Backend.matchHttpBase
 
     /** Asks the matchmaker which room to join for [mode]. */
-    suspend fun findMatch(mode: GameMode, playerId: String): MatchmakeResponse {
+    suspend fun findMatch(mode: GameMode): MatchmakeResponse {
         return http.get("$baseUrl/matchmake") {
             parameter("mode", mode.name)
-            parameter("playerId", playerId)
         }.body()
     }
 
@@ -61,6 +60,7 @@ class GameClient {
      */
     fun connect(
         roomId: String,
+        roomTicket: String,
         credentials: MatchCredentials,
         name: String,
         mode: GameMode,
@@ -69,6 +69,7 @@ class GameClient {
         val params = buildList {
             add("name" to name)
             add("mode" to mode.name)
+            add("roomTicket" to roomTicket)
         }
         val query = params.joinToString("&") { (k, v) -> "$k=${URLEncoder.encode(v, "UTF-8")}" }
 

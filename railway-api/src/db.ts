@@ -1,13 +1,11 @@
 import pg from "pg";
+import { postgresConnectionConfig } from "./runtime-config.js";
 
 const { Pool } = pg;
 
 export type DbClient = pg.PoolClient | pg.Pool;
 
-export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.PGSSL === "disable" ? false : { rejectUnauthorized: false },
-});
+export const pool = new Pool(postgresConnectionConfig());
 
 export async function tx<T>(work: (client: pg.PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect();

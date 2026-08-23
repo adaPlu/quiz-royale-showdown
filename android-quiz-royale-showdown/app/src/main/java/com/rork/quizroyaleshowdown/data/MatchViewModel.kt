@@ -67,14 +67,11 @@ class MatchViewModel(app: Application) : AndroidViewModel(app) {
 
         sessionJob = viewModelScope.launch {
             var attempt = 0
-            var roomId: String? = null
+            var matchmake: MatchmakeResponse? = null
 
             while (isActive && attempt <= MAX_RECONNECT_ATTEMPTS) {
                 try {
-                    if (roomId == null) {
-                        val found = client.findMatch(mode, prefs.deviceId)
-                        roomId = found.roomId
-                    }
+                    if (matchmake == null) matchmake = client.findMatch(mode)
                     _uiState.update {
                         it.copy(
                             status = if (attempt == 0) ConnectionStatus.CONNECTING
@@ -84,7 +81,8 @@ class MatchViewModel(app: Application) : AndroidViewModel(app) {
                     }
 
                     client.connect(
-                        roomId = roomId,
+                        roomId = matchmake.roomId,
+                        roomTicket = matchmake.roomTicket,
                         credentials = credentials,
                         name = prefs.playerName,
                         mode = mode,

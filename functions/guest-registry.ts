@@ -31,6 +31,7 @@ import {
 } from "./identity";
 import { mintSessionToken, sha256Hex } from "./auth-core";
 import { callDo, callDoJson, LEADERBOARD_ID, type DoEnv } from "./do-dispatch";
+import { enforceRateLimit, type RateLimitOptions } from "./rate-limit";
 
 /**
  * Session-scoped guest state. Note what is absent by design: no email, no
@@ -51,6 +52,10 @@ type GuestSession = {
 const SLOT_POOL_KEY = "free-slots";
 const NEXT_SLOT_KEY = "next-slot";
 const MAX_POOLED_SLOTS = 5_000;
+const DEFAULT_GUEST_NAME_BASE = "Challenger";
+const MAX_GUEST_NAME_LENGTH = 16;
+const GUEST_SESSION_RATE_LIMIT: RateLimitOptions = { max: 30, windowMs: 10 * 60 * 1000 };
+const GUEST_LIFECYCLE_RATE_LIMIT: RateLimitOptions = { max: 240, windowMs: 10 * 60 * 1000 };
 
 export class GuestRegistry extends DurableObject<DoEnv> {
   override async fetch(request: Request): Promise<Response> {
@@ -59,11 +64,11 @@ export class GuestRegistry extends DurableObject<DoEnv> {
     try {
       switch (`${request.method} ${url.pathname}`) {
         case "POST /guest/session":
-          return await this.issueOrRenew(request);
+          return await this.rateLimited(request, "guest-session", GUEST_SESSION_RATE_LIMIT, () => this.issueOrRenew(request));
         case "POST /guest/heartbeat":
-          return await this.heartbeat(request);
+          return await this.rateLimited(request, "guest-heartbeat", GUEST_LIFECYCLE_RATE_LIMIT, () => this.heartbeat(request));
         case "POST /guest/end":
-          return await this.endSession(request);
+          return await this.rateLimited(request, "guest-end", GUEST_LIFECYCLE_RATE_LIMIT, () => this.endSession(request));
         case "GET /guest/me":
           return await this.currentSession(request, url);
         case "GET /internal/guest/resolve":
@@ -81,6 +86,38 @@ export class GuestRegistry extends DurableObject<DoEnv> {
     }
   }
 
+  private async rateLimited(
+    request: Request,
+    action: string,
+    options: RateLimitOptions,
+    work: () => Promise<Response>,
+  ): Promise<Response> {
+    const limited = await enforceRateLimit(this.ctx, request, action, options);
+    return limited ?? await work();
+  }
+
+  private async availableGuestDisplayName(preferredName: string, excludeGuestId?: string): Promise<string> {
+    const base = preferredName || DEFAULT_GUEST_NAME_BASE;
+    const seed = preferredName ? base : `${DEFAULT_GUEST_NAME_BASE}00`;
+    const start = preferredName ? 0 : 1;
+
+    for (let offset = 0; offset < 1_000; offset += 1) {
+      const candidate = incrementGuestName(seed, start + offset);
+      if (!await this.guestDisplayNameTaken(candidate, excludeGuestId)) return candidate;
+    }
+
+    return `${DEFAULT_GUEST_NAME_BASE}${crypto.randomUUID().slice(0, 4)}`.slice(0, MAX_GUEST_NAME_LENGTH);
+  }
+
+  private async guestDisplayNameTaken(candidate: string, excludeGuestId?: string): Promise<boolean> {
+    const sessions = await this.ctx.storage.list<GuestSession>({ prefix: "guest:", limit: 1_000 });
+    for (const session of sessions.values()) {
+      if (session.guestId === excludeGuestId || session.expiresAt <= Date.now()) continue;
+      if (session.displayName.toLowerCase() === candidate.toLowerCase()) return true;
+    }
+    return false;
+  }
+
   /**
    * Issues a fresh guest id, or renews the supplied one if it is still alive.
    * Called on app start, so a returning player inside the TTL keeps their run.
@@ -96,7 +133,7 @@ export class GuestRegistry extends DurableObject<DoEnv> {
       if (existing && existing.expiresAt > Date.now() && await validGuestSecret(existing, existingSecret)) {
         existing.lastSeenAt = Date.now();
         existing.expiresAt = existing.lastSeenAt + GUEST_TTL_MS;
-        if (requestedName) existing.displayName = requestedName;
+        if (requestedName) existing.displayName = await this.availableGuestDisplayName(requestedName, existing.guestId);
         await this.ctx.storage.put(key(existingId), existing);
         await this.armSweep();
         return json({ guest: toDto(existing), reused: true });
@@ -110,7 +147,7 @@ export class GuestRegistry extends DurableObject<DoEnv> {
       const fresh: GuestSession = {
         guestId: `g${slot}-${nonce()}`,
         slot,
-        displayName: requestedName || `Guest${slot}`,
+        displayName: await this.availableGuestDisplayName(requestedName),
         createdAt: now,
         lastSeenAt: now,
         expiresAt: now + GUEST_TTL_MS,
@@ -273,19 +310,32 @@ export class GuestRegistry extends DurableObject<DoEnv> {
 
     // Keep sweeping only while guests exist, so an idle registry costs nothing.
     if (remaining > 0) {
-      await this.env.DO.setAlarm?.("GuestRegistry", "main", now + GUEST_SWEEP_MS);
+      await this.setRegistryAlarm(now + GUEST_SWEEP_MS);
     }
   }
 
   private async armSweep(): Promise<void> {
-    const setAlarm = this.env.DO.setAlarm;
-    const getAlarm = this.env.DO.getAlarm;
-    if (!setAlarm || !getAlarm) return;
-    const existing = await getAlarm.call(this.env.DO, "GuestRegistry", "main").catch(() => null);
+    const existing = await this.getRegistryAlarm();
     if (existing === null || existing === undefined) {
-      await setAlarm
-        .call(this.env.DO, "GuestRegistry", "main", Date.now() + GUEST_SWEEP_MS)
-        .catch(() => undefined);
+      await this.setRegistryAlarm(Date.now() + GUEST_SWEEP_MS);
+    }
+  }
+
+  private async getRegistryAlarm(): Promise<number | null> {
+    try {
+      return await this.ctx.storage.getAlarm();
+    } catch {
+      const getAlarm = this.env.DO?.getAlarm;
+      if (!getAlarm) return null;
+      return await getAlarm.call(this.env.DO, "GuestRegistry", "main").catch(() => null);
+    }
+  }
+
+  private async setRegistryAlarm(scheduledTime: number | Date): Promise<void> {
+    try {
+      await this.ctx.storage.setAlarm(scheduledTime);
+    } catch {
+      await this.env.DO?.setAlarm?.("GuestRegistry", "main", scheduledTime).catch(() => undefined);
     }
   }
 
@@ -352,7 +402,17 @@ async function validGuestSecret(session: GuestSession, secret: string | null): P
 
 function sanitizeGuestName(raw: unknown): string {
   if (typeof raw !== "string") return "";
-  return raw.replace(/[\u0000-\u001F\u007F]/g, "").trim().slice(0, 16);
+  return raw.replace(/[\u0000-\u001F\u007F]/g, "").trim().slice(0, MAX_GUEST_NAME_LENGTH);
+}
+
+function incrementGuestName(base: string, increment: number): string {
+  if (increment <= 0) return base.slice(0, MAX_GUEST_NAME_LENGTH);
+  const match = base.match(/^(.*?)(\d+)$/);
+  const suffix = match
+    ? String(Number.parseInt(match[2]!, 10) + increment).padStart(match[2]!.length, "0")
+    : String(increment).padStart(2, "0");
+  const prefix = (match?.[1] ?? base).slice(0, Math.max(0, MAX_GUEST_NAME_LENGTH - suffix.length));
+  return `${prefix}${suffix}`;
 }
 
 async function safeJson(request: Request): Promise<Record<string, unknown>> {

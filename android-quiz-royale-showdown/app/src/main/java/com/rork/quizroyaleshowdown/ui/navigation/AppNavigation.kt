@@ -118,9 +118,8 @@ fun AppNavigation() {
                 // Scoped to this destination so leaving the match tears the socket down.
                 val matchViewModel: MatchViewModel = viewModel()
 
-                // Publish "in a match" to friends for as long as this screen lives.
-                // The match room reports the same thing authoritatively; this keeps
-                // the client's own presence pings from clearing that claim.
+                // Keep the presence poll alive while the match screen is visible.
+                // The match room is the only authoritative IN_MATCH writer.
                 LifecycleResumeEffect(mode) {
                     authViewModel.setInMatch(mode)
                     onPauseOrDispose { authViewModel.setInMatch(null) }

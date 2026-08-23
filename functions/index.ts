@@ -2,7 +2,7 @@
 //
 // Routes:
 //   GET  /health                              liveness probe
-//   GET  /matchmake?mode=QUICK                returns { roomId } to connect to
+//   GET  /matchmake?mode=QUICK                returns { roomId, roomTicket } to connect to
 //   WS   /match/<roomId>?mode                 the authoritative match socket
 //
 //   POST /auth/register                       create a registered account
@@ -40,14 +40,17 @@ export { GuestRegistry } from "./guest-registry";
 export { Leaderboard } from "./leaderboard";
 
 import {
+  dispatchDurableObject,
   GUEST_REGISTRY_ID,
   LEADERBOARD_ID,
   USER_DIRECTORY_ID,
+  type DoClassName,
   type DoEnv,
 } from "./do-dispatch";
 import { MODE_CONFIG, type GameMode } from "./protocol";
 import type { GuestSessionDto, SubjectKind } from "./identity";
 import { callRailwayJson } from "./railway-api";
+import { mintRoomTicket, verifyRoomTicket } from "./room-ticket";
 
 type Env = DoEnv;
 
@@ -58,7 +61,7 @@ const CORS: Record<string, string> = {
 };
 
 /** Path -> DO class routing table for the plain-HTTP endpoints. */
-const HTTP_ROUTES: { pattern: RegExp; className: string; instance: string; methods: string[] }[] = [
+const HTTP_ROUTES: { pattern: RegExp; className: DoClassName; instance: string; methods: string[] }[] = [
   { pattern: /^\/auth\/(register|login|logout|forgot-password|reset-password)$/, className: "UserDirectory", instance: USER_DIRECTORY_ID, methods: ["POST"] },
   { pattern: /^\/auth\/me$/, className: "UserDirectory", instance: USER_DIRECTORY_ID, methods: ["GET"] },
   { pattern: /^\/users\/search$/, className: "UserDirectory", instance: USER_DIRECTORY_ID, methods: ["GET"] },
@@ -80,7 +83,18 @@ export default {
     }
 
     if (url.pathname === "/health") {
-      return Response.json({ ok: true, service: "quiz-royale", now: Date.now() }, { headers: CORS });
+      return Response.json(
+        {
+          ok: true,
+          service: "quiz-royale",
+          now: Date.now(),
+          configuration: {
+            railwayApi: Boolean(env.RAILWAY_API_URL?.trim() && env.RAILWAY_INTERNAL_TOKEN?.trim()),
+            matchRoomTickets: Boolean(env.MATCH_ROOM_TICKET_SECRET?.trim() || env.RAILWAY_INTERNAL_TOKEN?.trim()),
+          },
+        },
+        { headers: CORS },
+      );
     }
 
     if (url.pathname === "/matchmake" && request.method === "GET") {
@@ -112,10 +126,13 @@ async function handleMatchmake(request: Request, env: Env, url: URL): Promise<Re
 
   // Practice is solo by definition — no shared lobby, no matchmaker hop.
   if (mode === "PRACTICE") {
-    const playerId = url.searchParams.get("playerId") ?? crypto.randomUUID();
+    const roomId = `practice-${crypto.randomUUID()}-${Date.now().toString(36)}`;
+    const roomTicket = await mintRoomTicket(env, roomId, mode);
+    if (!roomTicket) return Response.json({ error: "match_tickets_unavailable" }, { status: 503, headers: CORS });
     return Response.json(
       {
-        roomId: `practice-${sanitizeRoomToken(playerId)}-${Date.now().toString(36)}`,
+        roomId,
+        roomTicket,
         mode,
         playersWaiting: 1,
         lobbyEndsAt: Date.now() + MODE_CONFIG.PRACTICE.lobbyMs,
@@ -125,11 +142,20 @@ async function handleMatchmake(request: Request, env: Env, url: URL): Promise<Re
   }
 
   const response = await dispatchToDo(env, "Matchmaker", mode, request);
-  const body = await response.text();
-  return new Response(body, {
-    status: response.status,
-    headers: { ...CORS, "Content-Type": "application/json" },
-  });
+  if (!response.ok) {
+    return new Response(response.body, {
+      status: response.status,
+      headers: { ...CORS, "Content-Type": "application/json" },
+    });
+  }
+
+  const body = (await response.json()) as { roomId?: string; mode?: GameMode; playersWaiting?: number; lobbyEndsAt?: number };
+  if (!body.roomId) return Response.json({ error: "matchmake_failed" }, { status: 502, headers: CORS });
+
+  const roomTicket = await mintRoomTicket(env, body.roomId, parseMode(body.mode ?? mode));
+  if (!roomTicket) return Response.json({ error: "match_tickets_unavailable" }, { status: 503, headers: CORS });
+
+  return Response.json({ ...body, roomTicket }, { status: response.status, headers: CORS });
 }
 
 // --------------------------------------------------------------- match socket
@@ -147,6 +173,15 @@ async function handleMatchSocket(
   url: URL,
   roomId: string,
 ): Promise<Response> {
+  const mode = parseMode(url.searchParams.get("mode"));
+  const ticket = url.searchParams.get("roomTicket");
+  if (!(await verifyRoomTicket(env, ticket, roomId, mode))) {
+    return new Response("invalid match room ticket", {
+      status: 403,
+      headers: CORS,
+    });
+  }
+
   const identity = await resolveIdentity(env, request, url);
   if (!identity) {
     return new Response("unable to establish an identity for this match", {
@@ -162,7 +197,7 @@ async function handleMatchSocket(
   target.searchParams.set("playerId", identity.subjectId);
   target.searchParams.set("name", identity.displayName);
   target.searchParams.set("kind", identity.kind);
-  target.searchParams.set("mode", parseMode(url.searchParams.get("mode")));
+  target.searchParams.set("mode", mode);
   target.searchParams.set("powerUpCharges", String(identity.powerUpCharges));
 
   // 2-arg form: the 1-arg form silently drops the Upgrade header.
@@ -275,14 +310,17 @@ async function resolveIdentity(env: Env, request: Request, url: URL): Promise<Re
 
 function dispatchToDo(
   env: Env,
-  className: string,
+  className: DoClassName,
   id: string,
   request: Request,
 ): Promise<Response> {
   const headers = new Headers(request.headers);
   headers.set("X-Rork-DO-Class", className);
   headers.set("X-Rork-DO-Id", id);
-  return env.DO.fetch(
+  return dispatchDurableObject(
+    env,
+    className,
+    id,
     new Request(request.url, {
       method: request.method,
       headers,
@@ -305,10 +343,6 @@ function withCors(response: Response): Response {
 function parseMode(raw: string | null): GameMode {
   if (raw === "TOURNAMENT" || raw === "PRACTICE" || raw === "QUICK") return raw;
   return "QUICK";
-}
-
-function sanitizeRoomToken(raw: string): string {
-  return raw.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "solo";
 }
 
 function bearer(request: Request): string | null {

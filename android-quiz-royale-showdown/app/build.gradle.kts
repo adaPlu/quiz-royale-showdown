@@ -5,6 +5,24 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+val releaseBuildRequested = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
+fun configuredValue(name: String): String =
+    providers.gradleProperty(name).orElse(providers.environmentVariable(name)).getOrElse("")
+
+fun requireReleaseValue(name: String, value: String) {
+    if (releaseBuildRequested && value.isBlank()) {
+        throw GradleException("$name must be configured for release builds.")
+    }
+}
+
+fun String.toBuildConfigLiteral(): String =
+    "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+val railwayApiUrl = configuredValue("EXPO_PUBLIC_RAILWAY_API_URL")
+val rorkFunctionsUrl = configuredValue("EXPO_PUBLIC_RORK_FUNCTIONS_URL")
+requireReleaseValue("EXPO_PUBLIC_RAILWAY_API_URL", railwayApiUrl)
+requireReleaseValue("EXPO_PUBLIC_RORK_FUNCTIONS_URL", rorkFunctionsUrl)
+
 android {
     namespace = "com.rork.quizroyaleshowdown"
     compileSdk = 36
@@ -15,6 +33,8 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
+        buildConfigField("String", "EXPO_PUBLIC_RAILWAY_API_URL", railwayApiUrl.toBuildConfigLiteral())
+        buildConfigField("String", "EXPO_PUBLIC_RORK_FUNCTIONS_URL", rorkFunctionsUrl.toBuildConfigLiteral())
     }
 
     buildTypes {

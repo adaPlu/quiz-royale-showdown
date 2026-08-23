@@ -8,7 +8,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { buildQuestionSet, type Question } from "./questions";
-import { callDo, GUEST_REGISTRY_ID, USER_DIRECTORY_ID } from "./do-dispatch";
+import { callDo, GUEST_REGISTRY_ID, USER_DIRECTORY_ID, type DoClassName, type DoEnv } from "./do-dispatch";
 import type { MatchOutcome, SubjectKind } from "./identity";
 import {
   callRailway,
@@ -30,12 +30,7 @@ import {
   type YouState,
 } from "./protocol";
 
-type Env = {
-  DO: Fetcher & {
-    setAlarm(className: string, id: string, scheduledTime: number | Date): Promise<void>;
-    getAlarm(className: string, id: string): Promise<number | null>;
-    deleteAlarm(className: string, id: string): Promise<void>;
-  };
+type Env = DoEnv & {
   RAILWAY_API_URL?: string;
   RAILWAY_INTERNAL_TOKEN?: string;
   ALLOW_STATIC_QUESTIONS_FALLBACK?: string;
@@ -335,11 +330,7 @@ export class MatchRoom extends DurableObject<Env> {
     }, delay);
 
     // Backstop in case the room is evicted before the timeout fires.
-    this.ctx.waitUntil(
-      this.env.DO
-        .setAlarm("MatchRoom", this.ctx.id.name ?? "", state.phaseEndsAt + 2_000)
-        .catch(() => undefined),
-    );
+    this.ctx.waitUntil(this.setRoomAlarm(state.phaseEndsAt + 2_000));
   }
 
   private tick(): void {
@@ -595,7 +586,7 @@ export class MatchRoom extends DurableObject<Env> {
   private async reportOutcomes(outcomes: MatchOutcome[]): Promise<void> {
     await Promise.all(
       outcomes.map(async (outcome) => {
-        const [className, instanceId] =
+        const [className, instanceId]: [DoClassName, string] =
           outcome.subjectKind === "USER"
             ? ["UserDirectory", USER_DIRECTORY_ID]
             : ["GuestRegistry", GUEST_REGISTRY_ID];
@@ -632,11 +623,7 @@ export class MatchRoom extends DurableObject<Env> {
       state.reportAttempts = (state.reportAttempts ?? 0) + 1;
       this.persist();
       const retryDelay = Math.min(60_000, 2_000 * 2 ** Math.min(state.reportAttempts, 5));
-      this.ctx.waitUntil(
-        this.env.DO
-          .setAlarm("MatchRoom", this.ctx.id.name ?? "", Date.now() + retryDelay)
-          .catch(() => undefined),
-      );
+      this.ctx.waitUntil(this.setRoomAlarm(Date.now() + retryDelay));
     }
   }
 
@@ -654,11 +641,16 @@ export class MatchRoom extends DurableObject<Env> {
       state.usageReportAttempts = (state.usageReportAttempts ?? 0) + 1;
       this.persist();
       const retryDelay = Math.min(60_000, 2_000 * 2 ** Math.min(state.usageReportAttempts, 5));
-      this.ctx.waitUntil(
-        this.env.DO
-          .setAlarm("MatchRoom", this.ctx.id.name ?? "", Date.now() + retryDelay)
-          .catch(() => undefined),
-      );
+      this.ctx.waitUntil(this.setRoomAlarm(Date.now() + retryDelay));
+    }
+  }
+
+  private async setRoomAlarm(scheduledTime: number | Date): Promise<void> {
+    try {
+      await this.ctx.storage.setAlarm(scheduledTime);
+      return;
+    } catch {
+      await this.env.DO?.setAlarm?.("MatchRoom", this.ctx.id.name ?? "", scheduledTime).catch(() => undefined);
     }
   }
 

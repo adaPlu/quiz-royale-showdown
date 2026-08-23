@@ -355,7 +355,7 @@ private fun IdentityCard(identity: Identity, accent: Color, expiry: GuestExpiryS
                         modifier = Modifier.size(13.dp)
                     )
                     Text(
-                        text = "Temporary id ${identity.session.guestId}",
+                        text = "Temporary guest session",
                         style = MaterialTheme.typography.bodySmall,
                         color = Arena.Cyan
                     )

@@ -57,13 +57,18 @@ import {
   selectQuestionSet,
   usageReportSchema,
 } from "./question-service.js";
+import { explicitReviewPassword } from "./runtime-config.js";
 
 const PORT = Number.parseInt(process.env.PORT ?? "8080", 10);
 const PASSWORD_RESET_TTL_MS = 30 * 60 * 1000;
 const MAX_FRIENDS = 200;
+const DEFAULT_GUEST_NAME_BASE = "Challenger";
+const MAX_GUEST_NAME_LENGTH = 16;
 const MAX_JSON_BODY_BYTES = Number.parseInt(process.env.MAX_JSON_BODY_BYTES ?? "1048576", 10);
 const AUTH_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 const AUTH_RATE_LIMIT_MAX = Number.parseInt(process.env.AUTH_RATE_LIMIT_MAX ?? "20", 10);
+const GUEST_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+const GUEST_RATE_LIMIT_MAX = Number.parseInt(process.env.GUEST_RATE_LIMIT_MAX ?? "240", 10);
 
 const CORS: Record<string, string> = {
   "Access-Control-Allow-Origin": process.env.CORS_ORIGIN ?? "*",
@@ -125,9 +130,9 @@ const server = http.createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/auth/me") return sendResponse(response, await me(request));
     if (request.method === "GET" && url.pathname === "/auth/resolve") return sendResponse(response, await resolveUser(request));
 
-    if (request.method === "POST" && url.pathname === "/guest/session") return sendResponse(response, await guestSession(request));
-    if (request.method === "POST" && url.pathname === "/guest/heartbeat") return sendResponse(response, await guestHeartbeat(request));
-    if (request.method === "POST" && url.pathname === "/guest/end") return sendResponse(response, await guestEnd(request));
+    if (request.method === "POST" && url.pathname === "/guest/session") return sendResponse(response, await rateLimited(request, "guest-session", () => guestSession(request), GUEST_RATE_LIMIT_MAX, GUEST_RATE_LIMIT_WINDOW_MS));
+    if (request.method === "POST" && url.pathname === "/guest/heartbeat") return sendResponse(response, await rateLimited(request, "guest-heartbeat", () => guestHeartbeat(request), GUEST_RATE_LIMIT_MAX, GUEST_RATE_LIMIT_WINDOW_MS));
+    if (request.method === "POST" && url.pathname === "/guest/end") return sendResponse(response, await rateLimited(request, "guest-end", () => guestEnd(request), GUEST_RATE_LIMIT_MAX, GUEST_RATE_LIMIT_WINDOW_MS));
     if (request.method === "GET" && url.pathname === "/guest/me") return sendResponse(response, await guestMe(request, url));
     if (request.method === "GET" && url.pathname === "/internal/guest/resolve") return sendResponse(response, await resolveGuest(request, url));
     if (request.method === "POST" && url.pathname === "/internal/guest/claim") return sendResponse(response, await claimGuest(request));
@@ -135,7 +140,7 @@ const server = http.createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/friends") return sendResponse(response, await listFriends(request));
     if (request.method === "POST" && url.pathname === "/friends/add") return sendResponse(response, await addFriend(request));
     if (request.method === "POST" && url.pathname === "/friends/remove") return sendResponse(response, await removeFriend(request));
-    if (request.method === "GET" && url.pathname === "/users/search") return sendResponse(response, await searchUsers(url));
+    if (request.method === "GET" && url.pathname === "/users/search") return sendResponse(response, await rateLimited(request, "user-search", () => searchUsers(request, url)));
     if (request.method === "POST" && url.pathname === "/presence/ping") return sendResponse(response, await presencePing(request));
     if (request.method === "POST" && url.pathname === "/internal/presence") return sendResponse(response, await internalPresence(request));
     if (request.method === "GET" && url.pathname === "/powerups") return sendResponse(response, await powerups(request, url));
@@ -390,7 +395,9 @@ async function guestSession(request: http.IncomingMessage): Promise<ApiResponse>
       if (existing && Number(existing.expires_at) > Date.now() && validGuestSecret(existing, existingSecret)) {
         const now = Date.now();
         const expiresAt = now + GUEST_TTL_MS;
-        const name = displayName || existing.display_name;
+        const name = displayName
+          ? await availableGuestDisplayName(client, displayName, existing.guest_id)
+          : existing.display_name;
         await client.query(
           "UPDATE guests SET display_name = $2, last_seen_at = $3, expires_at = $4 WHERE guest_id = $1",
           [existing.guest_id, name, now, expiresAt],
@@ -406,7 +413,7 @@ async function guestSession(request: http.IncomingMessage): Promise<ApiResponse>
     const now = Date.now();
     const guestId = `g${slot}-${crypto.randomUUID().replace(/-/g, "")}`;
     const guestSecret = mintGuestSecret();
-    const name = displayName || `Guest${slot}`;
+    const name = await availableGuestDisplayName(client, displayName);
     const expiresAt = now + GUEST_TTL_MS;
     const stats = emptyStats();
     await client.query(
@@ -546,7 +553,9 @@ async function removeFriend(request: http.IncomingMessage): Promise<ApiResponse>
   return [200, { ok: true, profile }];
 }
 
-async function searchUsers(url: URL): Promise<ApiResponse> {
+async function searchUsers(request: http.IncomingMessage, url: URL): Promise<ApiResponse> {
+  const meRow = await authenticate(request);
+  if (!meRow) return [401, { error: "unauthorized" }];
   const q = (url.searchParams.get("q") ?? "").trim().toLowerCase();
   if (q.length < 2) return [200, { results: [] }];
   const rows = await pool.query<{ user_id: string; username: string }>(
@@ -559,10 +568,8 @@ async function searchUsers(url: URL): Promise<ApiResponse> {
 async function presencePing(request: http.IncomingMessage): Promise<ApiResponse> {
   const meRow = await authenticate(request);
   if (!meRow) return [401, { error: "unauthorized" }];
-  const body = await safeJson(request);
-  const inMatch = body.status === "IN_MATCH";
-  const matchMode = typeof body.matchMode === "string" ? body.matchMode.slice(0, 16) : null;
-  await touchPresence(pool, meRow.user_id, inMatch ? { matchMode } : null);
+  await safeJson(request);
+  await touchPresence(pool, meRow.user_id, null);
   return [200, { ok: true, friends: await hydrateFriends(pool, meRow.user_id) }];
 }
 
@@ -914,10 +921,14 @@ async function syncPowerupInventory(
   );
 }
 
-async function ensureGooglePlayReviewAccount(): Promise<UserRow> {
+async function ensureGooglePlayReviewAccount(): Promise<UserRow | null> {
   const email = (process.env.GOOGLE_PLAY_REVIEW_EMAIL ?? GOOGLE_PLAY_REVIEW_EMAIL).trim().toLowerCase();
   const username = (process.env.GOOGLE_PLAY_REVIEW_USERNAME ?? GOOGLE_PLAY_REVIEW_USERNAME).trim();
-  const password = process.env.GOOGLE_PLAY_REVIEW_PASSWORD ?? "Test?Test.";
+  const password = explicitReviewPassword();
+  if (!password) {
+    console.warn("GOOGLE_PLAY_REVIEW_PASSWORD is not set; reviewer account provisioning skipped.");
+    return null;
+  }
   const passwordHash = await hashPassword(password);
   const entitlements = reviewAccountEntitlements();
   const currencyBalances = reviewAccountCurrencyBalances();
@@ -1184,10 +1195,12 @@ async function rateLimited(
   request: http.IncomingMessage,
   action: string,
   next: () => Promise<ApiResponse>,
+  max = AUTH_RATE_LIMIT_MAX,
+  windowMs = AUTH_RATE_LIMIT_WINDOW_MS,
 ): Promise<ApiResponse> {
   const key = `${action}:${clientAddress(request)}`;
   const now = Date.now();
-  const resetAt = now + AUTH_RATE_LIMIT_WINDOW_MS;
+  const resetAt = now + windowMs;
   const result = await pool.query<{ count: number; reset_at: string | number }>(
     `INSERT INTO auth_rate_limits(rate_key, count, reset_at, updated_at)
      VALUES ($1, 1, $2, $3)
@@ -1206,7 +1219,7 @@ async function rateLimited(
     [key, resetAt, now],
   );
   const row = result.rows[0];
-  if (row && Number(row.count) > AUTH_RATE_LIMIT_MAX) {
+  if (row && Number(row.count) > max) {
     return [429, { error: "rate_limited", message: "Too many attempts. Try again later." }];
   }
   if (Math.random() < 0.01) {
@@ -1276,7 +1289,43 @@ function isUnique(error: unknown, constraint: string): boolean {
 
 function sanitizeGuestName(raw: unknown): string {
   if (typeof raw !== "string") return "";
-  return raw.replace(/[\u0000-\u001F\u007F]/g, "").trim().slice(0, 16);
+  return raw.replace(/[\u0000-\u001F\u007F]/g, "").trim().slice(0, MAX_GUEST_NAME_LENGTH);
+}
+
+async function availableGuestDisplayName(
+  db: DbClient,
+  preferredName: string,
+  excludeGuestId: string | null = null,
+): Promise<string> {
+  await db.query("SELECT pg_advisory_xact_lock(hashtext('guest-display-names'))");
+  const base = preferredName || DEFAULT_GUEST_NAME_BASE;
+  const seed = preferredName ? base : `${DEFAULT_GUEST_NAME_BASE}00`;
+  const start = preferredName ? 0 : 1;
+
+  for (let offset = 0; offset < 1_000; offset += 1) {
+    const candidate = incrementGuestName(seed, start + offset);
+    const existing = await db.query(
+      `SELECT 1 FROM guests
+       WHERE expires_at > $1
+         AND lower(display_name) = lower($2)
+         AND ($3::text IS NULL OR guest_id <> $3)
+       LIMIT 1`,
+      [Date.now(), candidate, excludeGuestId],
+    );
+    if (existing.rowCount === 0) return candidate;
+  }
+
+  return `${DEFAULT_GUEST_NAME_BASE}${crypto.randomUUID().slice(0, 4)}`.slice(0, MAX_GUEST_NAME_LENGTH);
+}
+
+function incrementGuestName(base: string, increment: number): string {
+  if (increment <= 0) return base.slice(0, MAX_GUEST_NAME_LENGTH);
+  const match = base.match(/^(.*?)(\d+)$/);
+  const suffix = match
+    ? String(Number.parseInt(match[2]!, 10) + increment).padStart(match[2]!.length, "0")
+    : String(increment).padStart(2, "0");
+  const prefix = (match?.[1] ?? base).slice(0, Math.max(0, MAX_GUEST_NAME_LENGTH - suffix.length));
+  return `${prefix}${suffix}`;
 }
 
 function clamp(value: number, min: number, max: number): number {

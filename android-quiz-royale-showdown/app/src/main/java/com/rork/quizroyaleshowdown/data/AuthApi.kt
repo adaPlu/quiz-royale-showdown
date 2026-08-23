@@ -212,9 +212,9 @@ class AuthApi {
     }
 
     /**
-     * Reports that the player is still active, optionally in a match, and gets
-     * the friends list back in the same round trip. Returns null on failure so
-     * the caller can keep the last known presence rather than blanking it.
+     * Reports that the player is still active and gets the friends list back in
+     * the same round trip. Returns null on failure so the caller can keep the
+     * last known presence rather than blanking it.
      */
     suspend fun presencePing(token: String, matchMode: String?): List<Friend>? = runCatching {
         val response = http.post("$base/presence/ping") {
@@ -222,8 +222,7 @@ class AuthApi {
             contentType(ContentType.Application.Json)
             setBody(
                 buildJsonObject {
-                    put("status", JsonPrimitive(if (matchMode != null) "IN_MATCH" else "IDLE"))
-                    if (matchMode != null) put("matchMode", JsonPrimitive(matchMode))
+                    put("status", JsonPrimitive("IDLE"))
                 }
             )
         }
@@ -234,8 +233,11 @@ class AuthApi {
         null
     }
 
-    suspend fun searchUsers(query: String): List<UserSearchResult> = runCatching {
-        val response = http.get("$base/users/search") { parameter("q", query) }
+    suspend fun searchUsers(token: String, query: String): List<UserSearchResult> = runCatching {
+        val response = http.get("$base/users/search") {
+            header("Authorization", "Bearer $token")
+            parameter("q", query)
+        }
         if (!response.status.isSuccess()) return emptyList()
         response.body<UserSearchResponse>().results
     }.getOrElse { emptyList() }
