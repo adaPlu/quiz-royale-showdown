@@ -3,6 +3,7 @@
 // Routes:
 //   GET  /health                              liveness probe
 //   GET  /matchmake?mode=QUICK                returns { roomId, roomTicket } to connect to
+//   POST /websocket-ticket                    browser credential -> short-lived socket ticket
 //   WS   /match/<roomId>?mode                 the authoritative match socket
 //
 //   POST /auth/register                       create a registered account
@@ -51,7 +52,12 @@ import { MODE_CONFIG, type GameMode } from "./protocol";
 import type { GuestSessionDto, SubjectKind } from "./identity";
 import { callRailwayJson } from "./railway-api";
 import { buildMatchRoomTargetUrl } from "./match-routing";
-import { mintRoomTicket, verifyRoomTicket } from "./room-ticket";
+import {
+  mintRoomTicket,
+  mintSocketTicket,
+  verifyRoomTicket,
+  verifySocketTicket,
+} from "./room-ticket";
 
 type Env = DoEnv;
 
@@ -100,6 +106,10 @@ export default {
 
     if (url.pathname === "/matchmake" && request.method === "GET") {
       return await handleMatchmake(request, env, url);
+    }
+
+    if (url.pathname === "/websocket-ticket" && request.method === "POST") {
+      return await handleWebSocketTicket(request, env);
     }
 
     const roomMatch = url.pathname.match(/^\/match\/([A-Za-z0-9_-]+)$/);
@@ -159,6 +169,42 @@ async function handleMatchmake(request: Request, env: Env, url: URL): Promise<Re
   return Response.json({ ...body, roomTicket }, { status: response.status, headers: CORS });
 }
 
+/**
+ * Browser WebSockets cannot attach Android's custom auth headers. This exchange
+ * happens over normal HTTPS, validates the room assignment, resolves the caller,
+ * then mints a two-minute signed identity ticket for the socket handshake.
+ */
+async function handleWebSocketTicket(request: Request, env: Env): Promise<Response> {
+  let body: { roomId?: unknown; mode?: unknown; roomTicket?: unknown };
+  try {
+    body = await request.json() as { roomId?: unknown; mode?: unknown; roomTicket?: unknown };
+  } catch {
+    return Response.json({ error: "invalid_json" }, { status: 400, headers: CORS });
+  }
+
+  const roomId = typeof body.roomId === "string" ? body.roomId.trim() : "";
+  const roomTicket = typeof body.roomTicket === "string" ? body.roomTicket : null;
+  const mode = parseMode(typeof body.mode === "string" ? body.mode : null);
+  if (!roomId || !roomTicket) {
+    return Response.json({ error: "invalid_socket_ticket_request" }, { status: 400, headers: CORS });
+  }
+  if (!(await verifyRoomTicket(env, roomTicket, roomId, mode))) {
+    return Response.json({ error: "invalid_match_room_ticket" }, { status: 403, headers: CORS });
+  }
+
+  const identity = await resolveIdentity(env, request, new URL(request.url));
+  if (!identity) {
+    return Response.json({ error: "identity_required" }, { status: 401, headers: CORS });
+  }
+
+  const socketTicket = await mintSocketTicket(env, roomId, mode, identity);
+  if (!socketTicket) {
+    return Response.json({ error: "socket_tickets_unavailable" }, { status: 503, headers: CORS });
+  }
+
+  return Response.json({ socketTicket, expiresInMs: 2 * 60 * 1000 }, { headers: CORS });
+}
+
 // --------------------------------------------------------------- match socket
 
 type ResolvedIdentity = {
@@ -183,7 +229,10 @@ async function handleMatchSocket(
     });
   }
 
-  const identity = await resolveIdentity(env, request, url);
+  const browserTicket = url.searchParams.get("socketTicket");
+  const identity = browserTicket
+    ? await verifySocketTicket(env, browserTicket, roomId, mode)
+    : await resolveIdentity(env, request, url);
   if (!identity) {
     return new Response("unable to establish an identity for this match", {
       status: 401,
