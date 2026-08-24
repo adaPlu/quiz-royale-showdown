@@ -66,6 +66,9 @@ export default {
           service: "quiz-royale",
           now: Date.now(),
           configuration: {
+            railwayApiUrl: Boolean(env.RAILWAY_API_URL?.trim()),
+            railwayInternalToken: Boolean(env.RAILWAY_INTERNAL_TOKEN?.trim()),
+            matchRoomTicketSecret: Boolean(env.MATCH_ROOM_TICKET_SECRET?.trim()),
             railwayApi: Boolean(env.RAILWAY_API_URL?.trim() && env.RAILWAY_INTERNAL_TOKEN?.trim()),
             matchRoomTickets: Boolean(env.MATCH_ROOM_TICKET_SECRET?.trim() || env.RAILWAY_INTERNAL_TOKEN?.trim()),
           },

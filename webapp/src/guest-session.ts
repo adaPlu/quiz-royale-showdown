@@ -1,4 +1,4 @@
-import { RAILWAY_API_URL } from "./api";
+import { preserveGuestSecret, RAILWAY_API_URL } from "./api";
 import type { GuestSession, Identity } from "./types";
 
 export const GUEST_TTL_MS = 30 * 60 * 1000;
@@ -39,5 +39,8 @@ export async function heartbeatGuest(identity: Identity): Promise<Identity> {
   });
   if (!response.ok) throw new Error("Guest session expired.");
   const body = await response.json() as { guest: GuestSession };
-  return { kind: "guest", guest: body.guest };
+  return {
+    kind: "guest",
+    guest: preserveGuestSecret(body.guest, identity.guest),
+  };
 }

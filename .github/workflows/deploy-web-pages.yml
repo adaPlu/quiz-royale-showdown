@@ -1,80 +1,22 @@
-name: Deploy Web to Cloudflare Pages
+name: Deploy Web Multiplayer Production
 
 on:
   push:
     branches:
       - Railway-API-Implementation
     paths:
+      - "functions/**"
       - "webapp/**"
+      - ".github/scripts/live-web-multiplayer-smoke.mjs"
       - ".github/workflows/deploy-web-pages.yml"
+      - ".github/workflows/release-web-production.yml"
   workflow_dispatch:
-    inputs:
-      pages_branch:
-        description: "Cloudflare Pages branch label"
-        required: false
-        default: "Railway-API-Implementation"
-      project_name:
-        description: "Cloudflare Pages project name"
-        required: false
-        default: "quiz-royale-showdown"
 
 permissions:
   contents: read
   deployments: write
 
 jobs:
-  deploy:
-    name: Build and deploy web client
-    runs-on: ubuntu-latest
-    environment: production
-    env:
-      PROJECT_NAME: ${{ github.event.inputs.project_name || 'quiz-royale-showdown' }}
-      PAGES_BRANCH: ${{ github.event.inputs.pages_branch || 'Railway-API-Implementation' }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Verify Cloudflare deployment credentials
-        shell: bash
-        run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
-            echo "::error::Cloudflare Pages deployment requires CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID. Add them as GitHub repository or production-environment secrets."
-            exit 1
-          fi
-
-      - name: Install web dependencies
-        run: npm install --prefix webapp
-
-      - name: Build production web bundle
-        run: npm run build --prefix webapp
-
-      - name: Deploy to Cloudflare Pages
-        working-directory: webapp
-        run: >-
-          npx wrangler@latest pages deploy dist
-          --project-name "$PROJECT_NAME"
-          --branch "$PAGES_BRANCH"
-          --commit-hash "${{ github.sha }}"
-
-      - name: Report live deployment URL
-        shell: bash
-        run: |
-          npx wrangler@latest pages deployment list --project-name "$PROJECT_NAME" --json > pages-deployments.json
-          node <<'NODE' | tee -a "$GITHUB_STEP_SUMMARY"
-          const fs = require('fs');
-          const raw = JSON.parse(fs.readFileSync('pages-deployments.json', 'utf8'));
-          const deployments = Array.isArray(raw) ? raw : (raw.result || []);
-          const latest = deployments[0];
-          if (!latest) {
-            console.log('Deployment completed, but no deployment record was returned.');
-            process.exit(0);
-          }
-          console.log(`### Cloudflare Pages deployment`);
-          console.log(`- URL: ${latest.url || 'not returned'}`);
-          console.log(`- Environment: ${latest.environment || 'unknown'}`);
-          console.log(`- Branch: ${latest.deployment_trigger?.metadata?.branch || process.env.PAGES_BRANCH}`);
-          NODE
+  release:
+    uses: ./.github/workflows/release-web-production.yml
+    secrets: inherit
