@@ -2,12 +2,13 @@ name = "quiz-royale-functions"
 main = "index.ts"
 compatibility_date = "2026-08-22"
 
+[vars]
+ENVIRONMENT = "production"
+RAILWAY_API_URL = "https://railway-api-production-5772.up.railway.app"
+
 # Required secrets:
 #   wrangler secret put MATCH_ROOM_TICKET_SECRET
 #   wrangler secret put RAILWAY_INTERNAL_TOKEN
-#
-# Required vars:
-#   RAILWAY_API_URL = "https://<railway-api-domain>"
 #
 # Optional review account vars:
 #   GOOGLE_PLAY_REVIEW_EMAIL = "google-reviewer@quizroyale.gg"

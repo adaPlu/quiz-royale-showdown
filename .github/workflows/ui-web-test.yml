@@ -21,8 +21,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Install web dependencies
-        run: npm install --prefix webapp
+          cache: npm
+          cache-dependency-path: webapp/package-lock.json
+      - name: Install locked web dependencies
+        run: npm ci --prefix webapp
       - name: Typecheck and build web app
         run: npm run build --prefix webapp
       - name: Install Playwright browsers

@@ -125,3 +125,75 @@ test("registered player can open store cosmetics and social panels", async ({ pa
   await expect(page.getByRole("heading", { name: "Friends" })).toBeVisible();
   await expect(page.getByText("FriendOne")).toBeVisible();
 });
+
+test("guest secret survives restore heartbeat and socket-ticket exchange", async ({ page }) => {
+  await mockCommon(page);
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await page.addInitScript(() => {
+    localStorage.setItem("quizroyale.web.guestId", "g-restored");
+    localStorage.setItem("quizroyale.web.guestSecret", "secret-restored");
+    localStorage.setItem("quizroyale.web.guestName", "RestoredGuest");
+  });
+
+  const guestMeSecrets: string[] = [];
+  const heartbeatSecrets: string[] = [];
+  const ticketSecrets: string[] = [];
+  const secretlessGuest = () => ({
+    guestId: "g-restored",
+    displayName: "RestoredGuest",
+    expiresAt: Date.now() + 2 * 60 * 1000,
+    stats: emptyStats,
+  });
+
+  await page.route("**/guest/me", async (route) => {
+    guestMeSecrets.push((await route.request().headerValue("x-guest-secret")) ?? "");
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ guest: secretlessGuest() }),
+    });
+  });
+  await page.route("**/guest/heartbeat", async (route) => {
+    const body = route.request().postDataJSON() as { guestSecret?: string };
+    heartbeatSecrets.push(body.guestSecret ?? "");
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ guest: secretlessGuest() }),
+    });
+  });
+  await page.route("**/matchmake?mode=PRACTICE", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      roomId: "practice-regression",
+      roomTicket: "room-ticket",
+      mode: "PRACTICE",
+      playersWaiting: 1,
+      lobbyEndsAt: Date.now() + 10_000,
+    }),
+  }));
+  await page.route("**/websocket-ticket", async (route) => {
+    ticketSecrets.push((await route.request().headerValue("x-guest-secret")) ?? "");
+    await route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "Ticket service unavailable" }),
+    });
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "EXTEND" })).toBeVisible();
+  await page.getByRole("button", { name: "EXTEND" }).click();
+  await expect.poll(() => heartbeatSecrets).toEqual(["secret-restored"]);
+
+  await page.getByRole("navigation", { name: "Primary" }).getByRole("button", { name: "PLAY" }).click();
+  await page.getByRole("button", { name: /PRACTICE/ }).click();
+
+  await expect(page.getByText("Ticket service unavailable")).toBeVisible({ timeout: 6_000 });
+  expect(guestMeSecrets.length).toBeGreaterThanOrEqual(4);
+  expect(guestMeSecrets.every((secret) => secret === "secret-restored")).toBe(true);
+  expect(ticketSecrets).toEqual(["secret-restored", "secret-restored", "secret-restored"]);
+  expect(pageErrors).toEqual([]);
+});

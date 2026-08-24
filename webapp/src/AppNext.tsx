@@ -161,7 +161,26 @@ export default function AppNext() {
     return () => window.clearInterval(interval);
   }, [identity?.kind, identity?.kind === "guest" ? identity.guest.guestId : null]);
 
-  async function connectAssignment(activeIdentity: Identity, assignment: MatchmakeResponse, attempt = 0) {
+  function failConnection(error: unknown, fallback: string) {
+    if (joinWatchdogRef.current != null) {
+      window.clearTimeout(joinWatchdogRef.current);
+      joinWatchdogRef.current = null;
+    }
+    setJoiningMode(null);
+    setConnectionState("offline");
+    setMessage(error instanceof Error ? error.message : fallback);
+  }
+
+  async function waitForReconnect(attempt: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+      reconnectTimerRef.current = window.setTimeout(() => {
+        reconnectTimerRef.current = null;
+        resolve();
+      }, 750 * (attempt + 1));
+    });
+  }
+
+  async function connectAssignment(activeIdentity: Identity, assignment: MatchmakeResponse, attempt = 0): Promise<void> {
     setConnectionState(attempt === 0 ? "connecting" : "reconnecting");
     try {
       const socket = await openMatchSocket(
@@ -187,13 +206,16 @@ export default function AppNext() {
           if (attempt < 2 && assignmentRef.current) {
             setConnectionState("reconnecting");
             reconnectTimerRef.current = window.setTimeout(
-              () => void connectAssignment(activeIdentity, assignment, attempt + 1),
+              () => {
+                reconnectTimerRef.current = null;
+                void connectAssignment(activeIdentity, assignment, attempt + 1).catch((error) => {
+                  failConnection(error, "Could not reconnect to the arena.");
+                });
+              },
               750 * (attempt + 1),
             );
           } else {
-            setJoiningMode(null);
-            setConnectionState("offline");
-            setMessage("Connection lost. Return to Play and re-enter the arena.");
+            failConnection(new Error("Connection lost. Return to Play and re-enter the arena."), "Connection lost.");
           }
         },
         (failure) => setMessage(failure),
@@ -201,15 +223,12 @@ export default function AppNext() {
       socketRef.current = socket;
     } catch (error) {
       if (attempt < 2 && !intentionalCloseRef.current) {
-        reconnectTimerRef.current = window.setTimeout(
-          () => void connectAssignment(activeIdentity, assignment, attempt + 1),
-          750 * (attempt + 1),
-        );
-      } else {
-        setJoiningMode(null);
-        setConnectionState("offline");
-        throw error;
+        setConnectionState("reconnecting");
+        await waitForReconnect(attempt);
+        if (intentionalCloseRef.current) return;
+        return connectAssignment(activeIdentity, assignment, attempt + 1);
       }
+      throw error;
     }
   }
 
@@ -237,9 +256,7 @@ export default function AppNext() {
         setMessage("Arena handshake timed out. Try entering the match again.");
       }, 20_000);
     } catch (error) {
-      setJoiningMode(null);
-      setMessage(error instanceof Error ? error.message : "Could not enter the arena.");
-      setConnectionState("offline");
+      failConnection(error, "Could not enter the arena.");
     }
   }
 

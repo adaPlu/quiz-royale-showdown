@@ -58,9 +58,16 @@ function jsonHeaders(extra: HeadersInit = {}): Headers {
 
 function identityHeaders(identity: Identity): HeadersInit {
   if (identity.kind === "user") return { Authorization: `Bearer ${identity.token}` };
+  const storedGuestSecret = localStorage.getItem(GUEST_ID_KEY) === identity.guest.guestId
+    ? localStorage.getItem(GUEST_SECRET_KEY)
+    : null;
+  const guestSecret = identity.guest.guestSecret || storedGuestSecret;
+  if (!guestSecret) {
+    throw new Error("Guest session credentials are missing. Refresh to start a new session.");
+  }
   return {
     "X-Guest-Id": identity.guest.guestId,
-    "X-Guest-Secret": identity.guest.guestSecret ?? "",
+    "X-Guest-Secret": guestSecret,
   };
 }
 
@@ -68,11 +75,27 @@ function requireUser(identity: Identity): asserts identity is Extract<Identity, 
   if (identity.kind !== "user") throw new Error("Register or sign in to use this feature.");
 }
 
-function rememberGuest(guest: GuestSession): Identity {
-  localStorage.setItem(GUEST_ID_KEY, guest.guestId);
-  if (guest.guestSecret) localStorage.setItem(GUEST_SECRET_KEY, guest.guestSecret);
-  localStorage.setItem(GUEST_NAME_KEY, guest.displayName);
-  return { kind: "guest", guest };
+type GuestCredentials = Pick<GuestSession, "guestId" | "guestSecret">;
+
+export function preserveGuestSecret(guest: GuestSession, fallback?: GuestCredentials | null): GuestSession {
+  const storedGuestSecret = localStorage.getItem(GUEST_ID_KEY) === guest.guestId
+    ? localStorage.getItem(GUEST_SECRET_KEY)
+    : null;
+  const fallbackSecret = fallback?.guestId === guest.guestId ? fallback.guestSecret : null;
+  const guestSecret = guest.guestSecret || fallbackSecret || storedGuestSecret;
+  return guestSecret ? { ...guest, guestSecret } : guest;
+}
+
+function rememberGuest(guest: GuestSession, fallback?: GuestCredentials | null): Identity {
+  const rememberedGuest = preserveGuestSecret(guest, fallback);
+  localStorage.setItem(GUEST_ID_KEY, rememberedGuest.guestId);
+  if (rememberedGuest.guestSecret) {
+    localStorage.setItem(GUEST_SECRET_KEY, rememberedGuest.guestSecret);
+  } else {
+    localStorage.removeItem(GUEST_SECRET_KEY);
+  }
+  localStorage.setItem(GUEST_NAME_KEY, rememberedGuest.displayName);
+  return { kind: "guest", guest: rememberedGuest };
 }
 
 function rememberUser(result: AuthResult): Identity {
@@ -100,7 +123,7 @@ export async function restoreIdentity(): Promise<Identity> {
       const body = await jsonRequest<{ guest: GuestSession }>(`${RAILWAY_API_URL}/guest/me`, {
         headers: { "X-Guest-Id": guestId, "X-Guest-Secret": guestSecret },
       });
-      return rememberGuest(body.guest);
+      return rememberGuest(body.guest, { guestId, guestSecret });
     } catch {
       localStorage.removeItem(GUEST_ID_KEY);
       localStorage.removeItem(GUEST_SECRET_KEY);
@@ -121,7 +144,7 @@ export async function createGuest(displayName?: string): Promise<Identity> {
       ...(displayName?.trim() ? { displayName: displayName.trim().slice(0, 16) } : {}),
     }),
   });
-  return rememberGuest(body.guest);
+  return rememberGuest(body.guest, guestId && guestSecret ? { guestId, guestSecret } : null);
 }
 
 export async function login(identifier: string, password: string): Promise<Identity> {
@@ -175,7 +198,7 @@ export async function refreshIdentity(identity: Identity): Promise<Identity> {
   const body = await jsonRequest<{ guest: GuestSession }>(`${RAILWAY_API_URL}/guest/me`, {
     headers: identityHeaders(identity),
   });
-  return rememberGuest(body.guest);
+  return rememberGuest(body.guest, identity.guest);
 }
 
 export async function loadStore(identity: Identity): Promise<StoreItemsEnvelope> {
