@@ -1,0 +1,192 @@
+name: Production Web Sanity Probe
+
+on:
+  pull_request:
+    branches:
+      - Railway-API-Implementation
+    paths:
+      - ".deploy-trigger"
+      - ".github/workflows/production-web-sanity-pr.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  sanity:
+    if: github.head_ref == 'WebDeployTest'
+    name: Live Railway and Worker sanity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run live production sanity checks
+        env:
+          RAILWAY_API_URL: https://railway-api-production-5772.up.railway.app
+          MATCH_API_URL: https://quiz-royale-functions.adapluguez.workers.dev
+          WEB_ORIGIN: https://play.quizroyale.gg
+        run: |
+          cat > /tmp/quiz-web-sanity.mjs <<'EOF'
+          import crypto from 'node:crypto';
+
+          const railway = process.env.RAILWAY_API_URL;
+          const matchApi = process.env.MATCH_API_URL;
+          const webOrigin = process.env.WEB_ORIGIN;
+
+          function assert(condition, message) {
+            if (!condition) throw new Error(message);
+          }
+
+          async function request(url, init = {}, accepted = [200]) {
+            const response = await fetch(url, init);
+            const text = await response.text();
+            let body = {};
+            try { body = text ? JSON.parse(text) : {}; } catch { body = { raw: text }; }
+            if (!accepted.includes(response.status)) {
+              throw new Error(`${init.method ?? 'GET'} ${url} -> ${response.status}: ${text.slice(0, 500)}`);
+            }
+            return { response, body };
+          }
+
+          let guest = null;
+          try {
+            const railwayHealth = await request(`${railway}/health`, { headers: { Origin: webOrigin } });
+            console.log('Railway health: PASS');
+            console.log(`Railway Access-Control-Allow-Origin: ${railwayHealth.response.headers.get('access-control-allow-origin') ?? '<none>'}`);
+
+            const railwayPreflight = await request(`${railway}/auth/login`, {
+              method: 'OPTIONS',
+              headers: {
+                Origin: webOrigin,
+                'Access-Control-Request-Method': 'POST',
+                'Access-Control-Request-Headers': 'content-type,authorization',
+              },
+            }, [204]);
+            console.log(`Railway preflight allow-origin: ${railwayPreflight.response.headers.get('access-control-allow-origin') ?? '<none>'}`);
+
+            const workerHealth = await request(`${matchApi}/health`, { headers: { Origin: webOrigin } });
+            assert(workerHealth.response.headers.get('access-control-allow-origin') === webOrigin,
+              'Worker did not reflect the approved play.quizroyale.gg origin');
+            console.log('Worker CORS allowlist: PASS');
+
+            const guestResult = await request(`${railway}/guest/session`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ displayName: `WebCI${Date.now().toString(36).slice(-5)}` }),
+            });
+            guest = guestResult.body.guest;
+            assert(guest?.guestId && guest?.guestSecret, 'Guest session did not return credentials');
+            console.log('Guest session transaction: PASS');
+
+            await request(`${railway}/guest/me`, {
+              headers: { 'X-Guest-Id': guest.guestId, 'X-Guest-Secret': guest.guestSecret },
+            });
+            console.log('Guest profile read: PASS');
+
+            const suffix = Date.now().toString(36).slice(-6);
+            const username = `webci${suffix}`.slice(0, 16);
+            const email = `webci+${suffix}@example.com`;
+            const password = `T7!${crypto.randomUUID().replace(/-/g, '').slice(0, 14)}a`;
+            const registered = await request(`${railway}/auth/register`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ username, email, password }),
+            });
+            const token = registered.body.token;
+            assert(token, 'Registration did not return a session token');
+            console.log('Registration transaction: PASS');
+
+            const authHeaders = { Authorization: `Bearer ${token}` };
+            await request(`${railway}/auth/me`, { headers: authHeaders });
+            console.log('Authenticated profile read: PASS');
+
+            await request(`${railway}/store/items`, { headers: authHeaders });
+            console.log('Store read: PASS');
+
+            await request(`${railway}/cosmetics`, { headers: authHeaders });
+            console.log('Cosmetics read: PASS');
+
+            const season = await request(`${railway}/seasons/current`, { headers: authHeaders }, [200, 404]);
+            console.log(`Season read: PASS (${season.response.status})`);
+
+            const boards = await request(`${railway}/leaderboard/boards`);
+            assert(Array.isArray(boards.body.boards), 'Leaderboard boards payload malformed');
+            console.log('Leaderboard read: PASS');
+
+            const match = await request(`${matchApi}/matchmake?mode=PRACTICE`);
+            assert(match.body.roomId && match.body.roomTicket, 'Matchmake payload missing room assignment');
+            console.log('Cloudflare matchmaking: PASS');
+
+            const socketTicketResult = await request(`${matchApi}/websocket-ticket`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Guest-Id': guest.guestId,
+                'X-Guest-Secret': guest.guestSecret,
+              },
+              body: JSON.stringify({
+                roomId: match.body.roomId,
+                mode: match.body.mode,
+                roomTicket: match.body.roomTicket,
+              }),
+            });
+            const socketTicket = socketTicketResult.body.socketTicket;
+            assert(socketTicket, 'Socket-ticket exchange returned no ticket');
+            console.log('Browser socket-ticket exchange: PASS');
+
+            const wsBase = matchApi.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
+            const query = new URLSearchParams({
+              mode: match.body.mode,
+              roomTicket: match.body.roomTicket,
+              socketTicket,
+              name: guest.displayName,
+            });
+            const wsUrl = `${wsBase}/match/${encodeURIComponent(match.body.roomId)}?${query}`;
+
+            await new Promise((resolve, reject) => {
+              const socket = new WebSocket(wsUrl);
+              const timer = setTimeout(() => {
+                socket.close();
+                reject(new Error('Timed out waiting for authoritative match state'));
+              }, 25000);
+
+              socket.addEventListener('open', () => {
+                socket.send(JSON.stringify({ type: 'JOIN_MATCH', name: guest.displayName }));
+              });
+              socket.addEventListener('message', (event) => {
+                let message;
+                try { message = JSON.parse(String(event.data)); } catch { return; }
+                console.log(`WebSocket message: ${message.type ?? '<unknown>'}`);
+                if (message.type === 'MATCH_STATE' || message.type === 'ROUND_STARTED' || message.type === 'GAME_OVER') {
+                  clearTimeout(timer);
+                  socket.close();
+                  resolve();
+                }
+              });
+              socket.addEventListener('error', () => {
+                clearTimeout(timer);
+                reject(new Error('Production WebSocket connection failed'));
+              });
+            });
+            console.log('Live browser-protocol match join: PASS');
+
+            await request(`${railway}/auth/logout`, { method: 'POST', headers: authHeaders });
+            console.log('Logout transaction: PASS');
+          } finally {
+            if (guest?.guestId && guest?.guestSecret) {
+              await fetch(`${railway}/guest/end`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-Guest-Id': guest.guestId,
+                  'X-Guest-Secret': guest.guestSecret,
+                },
+                body: JSON.stringify({}),
+              }).catch(() => undefined);
+            }
+          }
+          EOF
+
+          node /tmp/quiz-web-sanity.mjs
