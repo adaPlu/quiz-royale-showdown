@@ -2,12 +2,10 @@ package com.rork.quizroyaleshowdown.data
 
 import android.app.Activity
 import android.content.Context
-import android.util.Log
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.BillingClientStateListener
 import com.android.billingclient.api.BillingFlowParams
 import com.android.billingclient.api.BillingResult
-import com.android.billingclient.api.ConsumeParams
 import com.android.billingclient.api.PendingPurchasesParams
 import com.android.billingclient.api.ProductDetails
 import com.android.billingclient.api.Purchase
@@ -44,9 +42,10 @@ data class BillingStoreState(
 /**
  * Google Play one-time/consumable billing adapter.
  *
- * Purchase callbacks do not grant currency locally. A PURCHASED token is sent
- * to Railway, Railway verifies it with the Google Play Developer API, and only
- * after a successful/idempotent grant do we consume the Play purchase.
+ * Purchase callbacks never grant currency locally. Railway supplies a stable,
+ * non-PII account binding that is attached to the Play checkout. A PURCHASED
+ * token is then sent to Railway; Railway verifies both the token and binding,
+ * commits the idempotent currency grant, and consumes the Play purchase.
  */
 class GooglePlayBillingManager(
     context: Context,
@@ -56,6 +55,7 @@ class GooglePlayBillingManager(
     private val commerceApi = CommerceApi()
     private var serverProducts: List<PaidCurrencyProduct> = emptyList()
     private var productDetails: Map<String, ProductDetails> = emptyMap()
+    private var accountBinding: String? = null
     private var connecting = false
 
     var onVerifiedGrant: (() -> Unit)? = null
@@ -78,6 +78,7 @@ class GooglePlayBillingManager(
         if (token == null) {
             serverProducts = emptyList()
             productDetails = emptyMap()
+            accountBinding = null
             _state.value = BillingStoreState()
             return
         }
@@ -94,6 +95,15 @@ class GooglePlayBillingManager(
                 return@launch
             }
             serverProducts = envelope.products
+            accountBinding = envelope.accountBinding.takeIf { it.isNotBlank() }
+            if (accountBinding == null) {
+                productDetails = emptyMap()
+                publishOffers()
+                _state.update {
+                    it.copy(error = "Secure Google Play account binding is unavailable. Try signing in again.")
+                }
+                return@launch
+            }
             publishOffers()
             ensureConnected()
         }
@@ -101,10 +111,11 @@ class GooglePlayBillingManager(
 
     fun launchPurchase(activity: Activity, productId: String) {
         if (_state.value.purchasingProductId != null) return
+        val binding = accountBinding
         val details = productDetails[productId]
         val offer = details?.oneTimePurchaseOfferDetailsList?.firstOrNull()
         val offerToken = offer?.offerToken?.takeIf { it.isNotBlank() }
-        if (details == null || offer == null || offerToken == null) {
+        if (binding == null || details == null || offer == null || offerToken == null) {
             _state.update {
                 it.copy(error = "This pack is not available from Google Play on this account yet.")
             }
@@ -117,6 +128,7 @@ class GooglePlayBillingManager(
             .build()
         val params = BillingFlowParams.newBuilder()
             .setProductDetailsParamsList(listOf(productParams))
+            .setObfuscatedAccountId(binding)
             .build()
         _state.update {
             it.copy(purchasingProductId = productId, error = null, notice = null)
@@ -227,6 +239,7 @@ class GooglePlayBillingManager(
     }
 
     private fun publishOffers() {
+        val bindingReady = !accountBinding.isNullOrBlank()
         val offers = serverProducts.map { pack ->
             val details = productDetails[pack.productId]
             val playOffer = details?.oneTimePurchaseOfferDetailsList?.firstOrNull()
@@ -236,7 +249,7 @@ class GooglePlayBillingManager(
                 currency = pack.currency,
                 amount = pack.amount,
                 formattedPrice = playOffer?.formattedPrice,
-                available = playOffer != null && offerToken != null
+                available = bindingReady && playOffer != null && offerToken != null
             )
         }
         _state.update { it.copy(offers = offers, loading = false) }
@@ -269,13 +282,13 @@ class GooglePlayBillingManager(
                     serverProducts.any { it.productId == productId }
                 }
                 if (knownProducts.isEmpty()) return
-                knownProducts.forEach { productId -> verifyThenConsume(productId, purchase) }
+                knownProducts.forEach { productId -> verifyPurchase(productId, purchase) }
             }
             else -> _state.update { it.copy(purchasingProductId = null) }
         }
     }
 
-    private fun verifyThenConsume(productId: String, purchase: Purchase) {
+    private fun verifyPurchase(productId: String, purchase: Purchase) {
         val token = prefs.sessionToken ?: return
         scope.launch {
             when (val outcome = commerceApi.verifyGooglePlayPurchase(
@@ -288,16 +301,16 @@ class GooglePlayBillingManager(
                     _state.update {
                         it.copy(
                             purchasingProductId = null,
-                            notice = if (grant.duplicate) {
-                                "Purchase was already credited; finalizing Google Play receipt."
-                            } else {
-                                "Added ${grant.grantedAmount} ${grant.currency ?: "currency"}."
+                            notice = when {
+                                grant.duplicate && grant.playFinalized -> "Purchase was already credited and is finalized."
+                                grant.duplicate -> "Purchase was already credited; Google Play finalization will retry automatically."
+                                grant.playFinalized -> "Added ${grant.grantedAmount} ${grant.currency ?: "currency"}."
+                                else -> "Added ${grant.grantedAmount} ${grant.currency ?: "currency"}; Google Play finalization will retry automatically."
                             },
                             error = null
                         )
                     }
                     onVerifiedGrant?.invoke()
-                    consume(purchase.purchaseToken)
                 }
                 is AuthOutcome.Invalid -> _state.update {
                     it.copy(
@@ -312,25 +325,6 @@ class GooglePlayBillingManager(
         }
     }
 
-    private fun consume(purchaseToken: String) {
-        if (!billingClient.isReady) return
-        val params = ConsumeParams.newBuilder()
-            .setPurchaseToken(purchaseToken)
-            .build()
-        billingClient.consumeAsync(params) { result, _ ->
-            if (result.responseCode != BillingClient.BillingResponseCode.OK) {
-                // The Railway receipt is idempotent. If consumption fails, this
-                // unconsumed purchase is discovered again on the next refresh,
-                // Railway returns duplicate=true, and consumption is retried.
-                Log.w(TAG, "Play consume failed: ${result.debugMessage}")
-            }
-        }
-    }
-
     private fun billingMessage(result: BillingResult, fallback: String): String =
         result.debugMessage.takeIf { it.isNotBlank() } ?: fallback
-
-    private companion object {
-        const val TAG = "PlayBilling"
-    }
 }
