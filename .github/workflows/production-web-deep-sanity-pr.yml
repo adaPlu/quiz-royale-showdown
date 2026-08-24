@@ -41,7 +41,7 @@ jobs:
 
           let guest;
           try {
-            const g = await req(`${railway}/guest/session`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({displayName:`WebCI${Date.now().toString(36).slice(-5)}`}) });
+            const g = await req(`${railway}/guest/session`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({displayName:`WebCI${Date.now().toString(36).slice(-5)}`}) }, [200,201]);
             guest = g.body.guest;
             ok(guest?.guestId && guest?.guestSecret, 'guest credentials missing');
             console.log('guest/session PASS');
@@ -52,7 +52,7 @@ jobs:
             const username = `webci${suffix}`.slice(0,16);
             const email = `webci+${suffix}@example.com`;
             const password = `T7!${crypto.randomUUID().replace(/-/g,'').slice(0,14)}a`;
-            const reg = await req(`${railway}/auth/register`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username,email,password}) });
+            const reg = await req(`${railway}/auth/register`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username,email,password}) }, [200,201]);
             ok(reg.body.token, 'auth/register token missing');
             const auth = { Authorization:`Bearer ${reg.body.token}` };
             console.log('auth/register PASS');
