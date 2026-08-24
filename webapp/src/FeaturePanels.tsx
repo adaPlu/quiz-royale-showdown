@@ -237,7 +237,7 @@ export function CosmeticsPanel({
   useEffect(() => {
     if (identity.kind !== "user") return;
     loadCosmetics(identity).then(setCosmetics).catch((e: Error) => setError(e.message));
-  }, [identity.kind, identity.kind === "user" ? identity.token : "guest", refreshKey]);
+  }, [identity, refreshKey]);
 
   if (identity.kind !== "user") return null;
 
