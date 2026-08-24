@@ -188,9 +188,13 @@ export async function exchangeSocketTicket(
   identity: Identity,
   match: MatchmakeResponse,
 ): Promise<string> {
+  // Revalidate the current credential immediately before binding it to a match.
+  // This prevents a stale browser session from falling through to an untracked
+  // throwaway guest during the Worker-side identity resolution safety net.
+  const validatedIdentity = await refreshIdentity(identity);
   const body = await jsonRequest<{ socketTicket: string }>(`${MATCH_API_URL}/websocket-ticket`, {
     method: "POST",
-    headers: jsonHeaders(identityHeaders(identity)),
+    headers: jsonHeaders(identityHeaders(validatedIdentity)),
     body: JSON.stringify({ roomId: match.roomId, mode: match.mode, roomTicket: match.roomTicket }),
   });
   return body.socketTicket;
