@@ -1,0 +1,46 @@
+name: Railway Production CORS Probe
+
+on:
+  pull_request:
+    branches:
+      - Railway-API-Implementation
+    paths:
+      - ".deploy-trigger"
+      - ".github/workflows/railway-cors-pr.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  configure:
+    if: github.head_ref == 'WebDeployTest'
+    name: Set Railway web CORS origin
+    runs-on: ubuntu-latest
+    container: ghcr.io/railwayapp/cli:latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PROJECT_ID: 493c9aa3-2496-4e9c-abff-1cec5c8755c9
+      ENVIRONMENT_ID: ed846463-c956-4087-a993-8eb72b6ade4a
+      SERVICE_ID: fbd450fb-a31e-4bf7-b106-e780b6ae4765
+      WEB_ORIGIN: https://play.quizroyale.gg
+    steps:
+      - name: Verify Railway credentials
+        shell: sh
+        run: |
+          if [ -z "$RAILWAY_TOKEN" ] && [ -z "$RAILWAY_API_TOKEN" ]; then
+            echo "::error::Missing RAILWAY_TOKEN or RAILWAY_API_TOKEN secret"
+            exit 1
+          fi
+          if [ -n "$RAILWAY_TOKEN" ]; then
+            unset RAILWAY_API_TOKEN
+          fi
+          railway --version
+
+      - name: Link production API service
+        shell: sh
+        run: railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" --service "$SERVICE_ID" --json
+
+      - name: Set production browser origin
+        shell: sh
+        run: railway variable set "CORS_ORIGIN=$WEB_ORIGIN" --service "$SERVICE_ID" --environment "$ENVIRONMENT_ID" --json
