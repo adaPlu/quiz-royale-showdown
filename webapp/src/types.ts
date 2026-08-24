@@ -1,5 +1,6 @@
 export type GameMode = "QUICK" | "TOURNAMENT" | "PRACTICE";
 export type MainRoute = "home" | "play" | "store" | "season" | "profile";
+export type PowerUp = "FIFTY_FIFTY" | "SHIELD" | "DOUBLE_DOWN";
 
 export type PlayerStats = {
   wins: number;
@@ -30,6 +31,26 @@ export type Friend = {
   presence: "OFFLINE" | "ONLINE" | "IN_MATCH" | string;
   matchMode?: string | null;
   lastSeenAt: number;
+};
+
+export type FriendInvite = {
+  inviteId: string;
+  direction: string;
+  status: string;
+  userId: string;
+  username: string;
+  createdAt: number;
+  respondedAt?: number | null;
+};
+
+export type FriendInvitesEnvelope = {
+  incoming: FriendInvite[];
+  outgoing: FriendInvite[];
+};
+
+export type UserSearchResult = {
+  userId: string;
+  username: string;
 };
 
 export type UserProfile = {
@@ -78,6 +99,20 @@ export type StoreItemsEnvelope = {
   items: StoreItem[];
 };
 
+export type CosmeticItem = {
+  cosmeticId: string;
+  cosmeticType: string;
+  displayName: string;
+  rarity: string;
+  payload: Record<string, unknown>;
+  owned: boolean;
+  equipped: boolean;
+};
+
+export type CosmeticsEnvelope = {
+  cosmetics: CosmeticItem[];
+};
+
 export type Season = {
   seasonId: string;
   name: string;
@@ -97,6 +132,24 @@ export type SeasonProgress = {
 export type CurrentSeasonEnvelope = {
   season: Season;
   progress: SeasonProgress;
+};
+
+export type LeaderboardEntry = {
+  rank: number;
+  subjectKind: string;
+  subjectId: string;
+  displayName: string;
+  points: number;
+  wins: number;
+  isYou?: boolean;
+};
+
+export type LeaderboardPage = {
+  board: string;
+  entries: LeaderboardEntry[];
+  yourRank?: number | null;
+  yourPoints: number;
+  totalRanked: number;
 };
 
 export type MatchmakeResponse = {
@@ -153,7 +206,7 @@ export type YouState = {
   placement?: number | null;
   answerIndex?: number | null;
   removedOptions: number[];
-  availablePowerUps: string[];
+  availablePowerUps: PowerUp[];
   shieldActive: boolean;
   doubleActive: boolean;
 };
