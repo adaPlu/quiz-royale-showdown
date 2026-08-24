@@ -155,7 +155,7 @@ async function sign(secret: string, payload: string): Promise<string> {
   return base64Url(signature);
 }
 
-function base64Url(buffer: ArrayBuffer): string {
+function base64Url(buffer: ArrayBufferLike): string {
   let raw = "";
   for (const byte of new Uint8Array(buffer)) raw += String.fromCharCode(byte);
   return btoa(raw).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
