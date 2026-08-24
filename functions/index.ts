@@ -18,6 +18,7 @@ import { MODE_CONFIG, type GameMode } from "./protocol";
 import type { GuestSessionDto, SubjectKind } from "./identity";
 import { callRailwayJson } from "./railway-api";
 import { buildMatchRoomTargetUrl } from "./match-routing";
+import { allowedBrowserOrigins, isBrowserOriginAllowed, type CorsConfig } from "./cors-policy";
 import {
   mintRoomTicket,
   mintSocketTicket,
@@ -25,20 +26,8 @@ import {
   verifySocketTicket,
 } from "./room-ticket";
 
-type Env = DoEnv & {
-  CORS_ORIGIN?: string;
-  CORS_ORIGINS?: string;
-};
+type Env = DoEnv & CorsConfig;
 
-const DEFAULT_BROWSER_ORIGINS = [
-  "https://quizroyale.gg",
-  "https://www.quizroyale.gg",
-  "https://play.quizroyale.gg",
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
-  "http://localhost:4173",
-  "http://127.0.0.1:4173",
-];
 const CORS_METHODS = "GET, POST, OPTIONS";
 const CORS_HEADERS = "Content-Type, Authorization, X-Guest-Id, X-Guest-Secret";
 
@@ -62,7 +51,7 @@ export default {
 
     // Native Android and server-to-server calls normally have no Origin header.
     // Browser calls must come from an explicit allowlisted origin.
-    if (origin && !allowedBrowserOrigins(env).has(origin)) {
+    if (!isBrowserOriginAllowed(origin, env)) {
       return new Response("origin not allowed", { status: 403 });
     }
 
@@ -348,15 +337,6 @@ function dispatchToDo(
       redirect: request.redirect,
     }),
   );
-}
-
-function allowedBrowserOrigins(env: Env): Set<string> {
-  const configured = [env.CORS_ORIGIN, env.CORS_ORIGINS]
-    .filter((value): value is string => Boolean(value?.trim()))
-    .flatMap((value) => value.split(","))
-    .map((value) => value.trim().replace(/\/$/, ""))
-    .filter(Boolean);
-  return new Set([...DEFAULT_BROWSER_ORIGINS, ...configured]);
 }
 
 function corsHeaders(request: Request, env: Env): Headers {
