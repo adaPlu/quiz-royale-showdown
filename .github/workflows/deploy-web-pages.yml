@@ -20,6 +20,7 @@ on:
 
 permissions:
   contents: read
+  deployments: write
 
 jobs:
   deploy:
@@ -38,15 +39,35 @@ jobs:
           node-version: 22
 
       - name: Verify Cloudflare deployment credentials
+        shell: bash
         run: |
-          test -n "$CLOUDFLARE_API_TOKEN" || { echo "::error::Missing CLOUDFLARE_API_TOKEN secret"; exit 1; }
-          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "::error::Missing CLOUDFLARE_ACCOUNT_ID secret"; exit 1; }
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error::Cloudflare Pages deployment requires CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID. Add them as GitHub repository or production-environment secrets."
+            exit 1
+          fi
 
       - name: Install web dependencies
         run: npm install --prefix webapp
 
       - name: Build production web bundle
         run: npm run build --prefix webapp
+
+      - name: Ensure Cloudflare Pages project exists
+        shell: bash
+        run: |
+          npx wrangler@latest pages project list --json > pages-projects.json
+          if node <<'NODE'
+          const fs = require('fs');
+          const raw = JSON.parse(fs.readFileSync('pages-projects.json', 'utf8'));
+          const projects = Array.isArray(raw) ? raw : (raw.result || []);
+          process.exit(projects.some((project) => project.name === process.env.PROJECT_NAME) ? 0 : 1);
+          NODE
+          then
+            echo "Cloudflare Pages project '$PROJECT_NAME' already exists."
+          else
+            echo "Creating Cloudflare Pages project '$PROJECT_NAME' with production branch '$PAGES_BRANCH'."
+            npx wrangler@latest pages project create "$PROJECT_NAME" --production-branch "$PAGES_BRANCH"
+          fi
 
       - name: Deploy to Cloudflare Pages
         working-directory: webapp
@@ -55,3 +76,22 @@ jobs:
           --project-name "$PROJECT_NAME"
           --branch "$PAGES_BRANCH"
           --commit-hash "${{ github.sha }}"
+
+      - name: Report live deployment URL
+        shell: bash
+        run: |
+          npx wrangler@latest pages deployment list --project-name "$PROJECT_NAME" --json > pages-deployments.json
+          node <<'NODE' | tee -a "$GITHUB_STEP_SUMMARY"
+          const fs = require('fs');
+          const raw = JSON.parse(fs.readFileSync('pages-deployments.json', 'utf8'));
+          const deployments = Array.isArray(raw) ? raw : (raw.result || []);
+          const latest = deployments[0];
+          if (!latest) {
+            console.log('Deployment completed, but no deployment record was returned.');
+            process.exit(0);
+          }
+          console.log(`### Cloudflare Pages deployment`);
+          console.log(`- URL: ${latest.url || 'not returned'}`);
+          console.log(`- Environment: ${latest.environment || 'unknown'}`);
+          console.log(`- Branch: ${latest.deployment_trigger?.metadata?.branch || process.env.PAGES_BRANCH}`);
+          NODE
