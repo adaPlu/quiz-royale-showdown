@@ -1,4 +1,4 @@
-name: Validate persistent navigation
+name: Build Quiz Royale beta APK
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
       - agent/validate-persistent-nav
 
 jobs:
-  android-compile:
+  android-beta:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -17,7 +17,16 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Compile Android debug Kotlin
+      - name: Build installable beta APK
         run: |
           chmod +x ./gradlew
-          ./gradlew :app:compileDebugKotlin --no-daemon
+          ./gradlew :app:assembleDebug --no-daemon
+      - name: Stage beta APK
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk ../quiz-royale-showdown-v1.1-beta.apk
+      - name: Upload beta APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: quiz-royale-showdown-v1.1-beta-apk
+          path: quiz-royale-showdown-v1.1-beta.apk
+          if-no-files-found: error
