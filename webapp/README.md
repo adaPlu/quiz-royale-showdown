@@ -94,15 +94,21 @@ The existing `public/privacy-policy/` directory is copied into the Vite build au
 
 ## Production-origin hardening
 
-Before public release, restrict Railway and Worker CORS to the final web origins rather than leaving wildcard development access. Keep localhost only for development/staging.
-
-Suggested allowed origins:
+The Cloudflare Worker enforces an explicit browser-origin allowlist. Built-in approved origins are:
 
 ```text
 https://quizroyale.gg
 https://www.quizroyale.gg
 https://play.quizroyale.gg
+http://localhost:5173
+http://127.0.0.1:5173
+http://localhost:4173
+http://127.0.0.1:4173
 ```
+
+Additional exact staging or preview origins can be supplied through the Worker's `CORS_ORIGINS` comma-separated variable or the legacy `CORS_ORIGIN` variable. Unknown browser origins receive HTTP 403. Requests without an `Origin` header remain permitted so Android/native and server-to-server traffic continue to work.
+
+The Railway API already supports the `CORS_ORIGIN` environment variable. Before public deployment, set it to the exact public web origin—for example `https://play.quizroyale.gg`—rather than leaving the wildcard fallback. If multiple public Railway browser origins become necessary, extend that single-origin policy deliberately instead of using `*` for authenticated routes.
 
 ## Release gate
 
