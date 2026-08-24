@@ -3,6 +3,8 @@ package com.rork.quizroyaleshowdown.data
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -12,6 +14,7 @@ import kotlinx.coroutines.launch
 data class SeasonUiState(
     val season: Season? = null,
     val progress: SeasonProgress? = null,
+    val hasSeasonPass: Boolean = false,
     val loading: Boolean = true,
     val error: String? = null
 )
@@ -37,12 +40,22 @@ class SeasonViewModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch {
             _uiState.update { it.copy(loading = true, error = null) }
-            val current = api.currentSeason(token)
+            val (current, profile) = coroutineScope {
+                val season = async { api.currentSeason(token) }
+                val me = async { api.me(token) }
+                season.await() to me.await()
+            }
             _uiState.update {
                 if (current == null) {
                     it.copy(loading = false, error = "Could not load the current season.")
                 } else {
-                    it.copy(loading = false, season = current.season, progress = current.progress, error = null)
+                    it.copy(
+                        loading = false,
+                        season = current.season,
+                        progress = current.progress,
+                        hasSeasonPass = profile?.entitlements?.seasonPassAccess == true,
+                        error = null
+                    )
                 }
             }
         }
