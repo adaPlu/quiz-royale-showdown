@@ -1,5 +1,6 @@
 name: Deploy Web to Cloudflare Pages
 
+# Deployment trigger refreshed after Cloudflare credentials were configured.
 on:
   push:
     branches:
