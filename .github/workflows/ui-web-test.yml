@@ -1,0 +1,56 @@
+name: UI and Web Test
+
+on:
+  push:
+    branches:
+      - UITest
+  pull_request:
+    branches:
+      - Railway-API-Implementation
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    name: Web build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install web dependencies
+        run: npm install --prefix webapp
+      - name: Typecheck and build web app
+        run: npm run build --prefix webapp
+
+  worker:
+    name: Worker tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Worker dependencies
+        run: npm ci --prefix functions
+      - name: Run Worker tests
+        run: npm test --prefix functions
+
+  android:
+    name: Android unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android-quiz-royale-showdown
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Run Android unit tests
+        run: ./gradlew :app:testDebugUnitTest --stacktrace
