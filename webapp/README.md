@@ -12,7 +12,22 @@ Web browser ─┬─ HTTPS ─► Railway API ─► PostgreSQL + Redis
 Android ─────┴───────────────────────────────────────────────┘
 ```
 
-This keeps accounts, guest sessions, stats, friends, store inventory, seasons, leaderboards, questions and match results shared across Android and Web.
+Accounts, guest sessions, stats, friends, invites, store inventory, cosmetics, seasons, leaderboards, questions and match results are shared across Android and Web.
+
+## Current web feature surface
+
+- Persistent HOME / PLAY / STORE / SEASON / PROFILE navigation
+- Guest sessions with activity-aware heartbeat and expiry warnings
+- Register/sign-in with guest-stat transfer
+- Global/category leaderboard panel
+- Friends list, player search, invites, accept/decline/cancel and remove
+- Store purchases and shared currency balances
+- Cosmetics collection/equip UI
+- Season XP/progression
+- Quick Match, Tournament and Practice matchmaking
+- Browser-safe short-lived WebSocket identity tickets
+- Match reconnect attempts, join timeout, keyboard answers and power-up controls
+- Responsive desktop/mobile layout and reduced-motion/focus accessibility support
 
 ## Local development
 
@@ -28,9 +43,10 @@ Optional overrides:
 ```env
 VITE_RAILWAY_API_URL=https://railway-api-production-5772.up.railway.app
 VITE_FUNCTIONS_URL=https://quiz-royale-functions.adapluguez.workers.dev
+VITE_TELEMETRY_URL=
 ```
 
-Production defaults already point at those services.
+Production defaults already point at the Railway and Cloudflare services. `VITE_TELEMETRY_URL` is optional; when absent, no telemetry is sent off-device.
 
 ## Browser WebSocket authentication
 
@@ -43,6 +59,17 @@ Browsers cannot add Android's custom authentication headers to a WebSocket hands
 
 Long-lived user/guest secrets are not placed in the WebSocket URL.
 
+## Browser tests
+
+The smoke suite uses mocked backend responses so navigation and feature surfaces can be validated without modifying production data.
+
+```bash
+npx playwright install chromium firefox webkit
+npm run test:e2e
+```
+
+CI runs the suite in Chromium, Firefox and WebKit after TypeScript/Vite build verification.
+
 ## Cloudflare Pages deployment
 
 Recommended Pages project settings:
@@ -52,6 +79,11 @@ Recommended Pages project settings:
 - Build output directory: `dist`
 - Production branch: whichever branch is promoted from `UITest`
 
+A manual GitHub workflow is available at `.github/workflows/deploy-web-pages.yml`. It requires repository/environment secrets:
+
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
+
 Recommended domains:
 
 - `quizroyale.gg` or `play.quizroyale.gg` → Cloudflare Pages web client
@@ -60,13 +92,26 @@ Recommended domains:
 
 The existing `public/privacy-policy/` directory is copied into the Vite build automatically, so `/privacy-policy/` remains available from the web deployment.
 
+## Production-origin hardening
+
+Before public release, restrict Railway and Worker CORS to the final web origins rather than leaving wildcard development access. Keep localhost only for development/staging.
+
+Suggested allowed origins:
+
+```text
+https://quizroyale.gg
+https://www.quizroyale.gg
+https://play.quizroyale.gg
+```
+
 ## Release gate
 
 Before production promotion:
 
 ```bash
 npm run build
+npm run test:e2e
 npm test --prefix ../functions
 ```
 
-Also run Android unit tests from `android-quiz-royale-showdown` to ensure the shared Worker changes did not regress the mobile client.
+Also run Android unit tests from `android-quiz-royale-showdown` to ensure shared Worker changes did not regress the mobile client. Then perform one real Android ↔ Web multiplayer match against the intended production/staging infrastructure before deploying the public URL.
