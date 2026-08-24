@@ -80,10 +80,40 @@ const MAX_PENDING_INVITES = 50;
 const SEASON_XP_PER_LEVEL = 1_000;
 
 const CORS: Record<string, string> = {
-  "Access-Control-Allow-Origin": process.env.CORS_ORIGIN ?? "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Internal-Token, X-Guest-Id, X-Guest-Secret",
 };
+
+const DEFAULT_BROWSER_ORIGINS = new Set([
+  "https://quizroyale.gg",
+  "https://www.quizroyale.gg",
+  "https://play.quizroyale.gg",
+  "https://quiz-royale-showdown.pages.dev",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://localhost:4173",
+  "http://127.0.0.1:4173",
+]);
+const PAGES_PROJECT_HOST = "quiz-royale-showdown.pages.dev";
+
+function corsOriginForRequest(request: http.IncomingMessage): string | null {
+  const rawOrigin = request.headers.origin;
+  if (typeof rawOrigin !== "string" || !rawOrigin.trim()) return "*";
+  const origin = rawOrigin.trim().replace(/\/$/, "");
+  const configured = [process.env.CORS_ORIGIN, process.env.CORS_ORIGINS]
+    .filter((value): value is string => Boolean(value?.trim()))
+    .flatMap((value) => value.split(","))
+    .map((value) => value.trim().replace(/\/$/, ""))
+    .filter(Boolean);
+  if (DEFAULT_BROWSER_ORIGINS.has(origin) || configured.includes(origin)) return origin;
+  try {
+    const url = new URL(origin);
+    if (url.protocol === "https:" && url.hostname.endsWith(`.${PAGES_PROJECT_HOST}`)) return origin;
+  } catch {
+    return null;
+  }
+  return null;
+}
 
 type UserRow = {
   user_id: string;
@@ -177,6 +207,15 @@ export function createQuizRoyaleApiServer(): http.Server {
 
 export async function handleRequest(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
   try {
+    const requestOrigin = typeof request.headers.origin === "string" ? request.headers.origin.trim() : "";
+    const allowedOrigin = corsOriginForRequest(request);
+    if (requestOrigin && !allowedOrigin) {
+      response.writeHead(403);
+      response.end();
+      return;
+    }
+    if (allowedOrigin) response.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+    if (requestOrigin) response.setHeader("Vary", "Origin");
     if (request.method === "OPTIONS") return send(response, 204, null);
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
 
