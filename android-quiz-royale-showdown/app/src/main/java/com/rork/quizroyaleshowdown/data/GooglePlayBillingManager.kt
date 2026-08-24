@@ -103,7 +103,8 @@ class GooglePlayBillingManager(
         if (_state.value.purchasingProductId != null) return
         val details = productDetails[productId]
         val offer = details?.oneTimePurchaseOfferDetailsList?.firstOrNull()
-        if (details == null || offer == null) {
+        val offerToken = offer?.offerToken?.takeIf { it.isNotBlank() }
+        if (details == null || offer == null || offerToken == null) {
             _state.update {
                 it.copy(error = "This pack is not available from Google Play on this account yet.")
             }
@@ -112,7 +113,7 @@ class GooglePlayBillingManager(
 
         val productParams = BillingFlowParams.ProductDetailsParams.newBuilder()
             .setProductDetails(details)
-            .setOfferToken(offer.offerToken)
+            .setOfferToken(offerToken)
             .build()
         val params = BillingFlowParams.newBuilder()
             .setProductDetailsParamsList(listOf(productParams))
@@ -229,12 +230,13 @@ class GooglePlayBillingManager(
         val offers = serverProducts.map { pack ->
             val details = productDetails[pack.productId]
             val playOffer = details?.oneTimePurchaseOfferDetailsList?.firstOrNull()
+            val offerToken = playOffer?.offerToken?.takeIf { it.isNotBlank() }
             CurrencyPackOffer(
                 productId = pack.productId,
                 currency = pack.currency,
                 amount = pack.amount,
                 formattedPrice = playOffer?.formattedPrice,
-                available = playOffer != null
+                available = playOffer != null && offerToken != null
             )
         }
         _state.update { it.copy(offers = offers, loading = false) }
