@@ -1,0 +1,30 @@
+name: Diagnose web fetch
+
+on:
+  pull_request:
+    branches:
+      - Railway-API-Implementation
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check browser CORS from deployed Pages origins
+        shell: bash
+        run: |
+          set -euxo pipefail
+          for ORIGIN in \
+            https://a55e1b76.quiz-royale-showdown.pages.dev \
+            https://quiz-royale-showdown.pages.dev
+          do
+            echo "=== Railway preflight from $ORIGIN ==="
+            curl -sS -D - -o /dev/null -X OPTIONS \
+              'https://railway-api-production-5772.up.railway.app/guest/session' \
+              -H "Origin: $ORIGIN" \
+              -H 'Access-Control-Request-Method: POST' \
+              -H 'Access-Control-Request-Headers: content-type'
+            echo "=== Worker health from $ORIGIN ==="
+            curl -sS -D - -o /dev/null \
+              'https://quiz-royale-functions.adapluguez.workers.dev/health' \
+              -H "Origin: $ORIGIN"
+          done
