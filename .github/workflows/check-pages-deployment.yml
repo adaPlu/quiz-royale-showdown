@@ -1,9 +1,9 @@
 name: Check Cloudflare Pages deployment
 
 on:
-  pull_request:
+  push:
     branches:
-      - Railway-API-Implementation
+      - agent/check-web-deployment
 
 jobs:
   inspect-pages:
