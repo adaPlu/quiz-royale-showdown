@@ -1,0 +1,334 @@
+package com.rork.quizroyaleshowdown.data
+
+import android.app.Activity
+import android.content.Context
+import android.util.Log
+import com.android.billingclient.api.BillingClient
+import com.android.billingclient.api.BillingClientStateListener
+import com.android.billingclient.api.BillingFlowParams
+import com.android.billingclient.api.BillingResult
+import com.android.billingclient.api.ConsumeParams
+import com.android.billingclient.api.PendingPurchasesParams
+import com.android.billingclient.api.ProductDetails
+import com.android.billingclient.api.Purchase
+import com.android.billingclient.api.PurchasesUpdatedListener
+import com.android.billingclient.api.QueryProductDetailsParams
+import com.android.billingclient.api.QueryPurchasesParams
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+
+data class CurrencyPackOffer(
+    val productId: String,
+    val currency: String,
+    val amount: Int,
+    val formattedPrice: String? = null,
+    val available: Boolean = false
+)
+
+data class BillingStoreState(
+    val offers: List<CurrencyPackOffer> = emptyList(),
+    val loading: Boolean = false,
+    val connected: Boolean = false,
+    val purchasingProductId: String? = null,
+    val notice: String? = null,
+    val error: String? = null
+)
+
+/**
+ * Google Play one-time/consumable billing adapter.
+ *
+ * Purchase callbacks do not grant currency locally. A PURCHASED token is sent
+ * to Railway, Railway verifies it with the Google Play Developer API, and only
+ * after a successful/idempotent grant do we consume the Play purchase.
+ */
+class GooglePlayBillingManager(
+    context: Context,
+    private val prefs: PlayerPrefs
+) : PurchasesUpdatedListener {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val commerceApi = CommerceApi()
+    private var serverProducts: List<PaidCurrencyProduct> = emptyList()
+    private var productDetails: Map<String, ProductDetails> = emptyMap()
+    private var connecting = false
+
+    var onVerifiedGrant: (() -> Unit)? = null
+
+    private val _state = MutableStateFlow(BillingStoreState())
+    val state: StateFlow<BillingStoreState> = _state.asStateFlow()
+
+    private val billingClient: BillingClient = BillingClient.newBuilder(context.applicationContext)
+        .setListener(this)
+        .enablePendingPurchases(
+            PendingPurchasesParams.newBuilder()
+                .enableOneTimeProducts()
+                .build()
+        )
+        .enableAutoServiceReconnection()
+        .build()
+
+    fun refresh() {
+        val token = prefs.sessionToken
+        if (token == null) {
+            serverProducts = emptyList()
+            productDetails = emptyMap()
+            _state.value = BillingStoreState()
+            return
+        }
+        scope.launch {
+            _state.update { it.copy(loading = true, error = null) }
+            val envelope = commerceApi.currencyPacks(token)
+            if (envelope == null) {
+                _state.update {
+                    it.copy(
+                        loading = false,
+                        error = "Paid currency packs are temporarily unavailable."
+                    )
+                }
+                return@launch
+            }
+            serverProducts = envelope.products
+            publishOffers()
+            ensureConnected()
+        }
+    }
+
+    fun launchPurchase(activity: Activity, productId: String) {
+        if (_state.value.purchasingProductId != null) return
+        val details = productDetails[productId]
+        val offer = details?.oneTimePurchaseOfferDetailsList?.firstOrNull()
+        if (details == null || offer == null) {
+            _state.update {
+                it.copy(error = "This pack is not available from Google Play on this account yet.")
+            }
+            return
+        }
+
+        val productParams = BillingFlowParams.ProductDetailsParams.newBuilder()
+            .setProductDetails(details)
+            .setOfferToken(offer.offerToken)
+            .build()
+        val params = BillingFlowParams.newBuilder()
+            .setProductDetailsParamsList(listOf(productParams))
+            .build()
+        _state.update {
+            it.copy(purchasingProductId = productId, error = null, notice = null)
+        }
+        val result = billingClient.launchBillingFlow(activity, params)
+        if (result.responseCode != BillingClient.BillingResponseCode.OK) {
+            _state.update {
+                it.copy(
+                    purchasingProductId = null,
+                    error = billingMessage(result, "Could not open Google Play checkout.")
+                )
+            }
+        }
+    }
+
+    override fun onPurchasesUpdated(result: BillingResult, purchases: MutableList<Purchase>?) {
+        when (result.responseCode) {
+            BillingClient.BillingResponseCode.OK -> purchases.orEmpty().forEach(::processPurchase)
+            BillingClient.BillingResponseCode.USER_CANCELED -> {
+                _state.update { it.copy(purchasingProductId = null, notice = "Purchase canceled.") }
+            }
+            BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED -> {
+                _state.update { it.copy(purchasingProductId = null) }
+                queryUnconsumedPurchases()
+            }
+            else -> {
+                _state.update {
+                    it.copy(
+                        purchasingProductId = null,
+                        error = billingMessage(result, "Google Play purchase failed.")
+                    )
+                }
+            }
+        }
+    }
+
+    fun clearMessages() {
+        _state.update { it.copy(error = null, notice = null) }
+    }
+
+    fun shutdown() {
+        onVerifiedGrant = null
+        runCatching { billingClient.endConnection() }
+        commerceApi.shutdown()
+        scope.cancel()
+    }
+
+    private fun ensureConnected() {
+        if (billingClient.isReady) {
+            _state.update { it.copy(connected = true) }
+            queryProductDetails()
+            queryUnconsumedPurchases()
+            return
+        }
+        if (connecting) return
+        connecting = true
+        billingClient.startConnection(object : BillingClientStateListener {
+            override fun onBillingSetupFinished(result: BillingResult) {
+                connecting = false
+                if (result.responseCode == BillingClient.BillingResponseCode.OK) {
+                    _state.update { it.copy(connected = true, error = null) }
+                    queryProductDetails()
+                    queryUnconsumedPurchases()
+                } else {
+                    _state.update {
+                        it.copy(
+                            connected = false,
+                            loading = false,
+                            error = billingMessage(result, "Google Play Billing is unavailable.")
+                        )
+                    }
+                }
+            }
+
+            override fun onBillingServiceDisconnected() {
+                connecting = false
+                _state.update { it.copy(connected = false) }
+            }
+        })
+    }
+
+    private fun queryProductDetails() {
+        if (!billingClient.isReady || serverProducts.isEmpty()) {
+            publishOffers()
+            return
+        }
+        val products = serverProducts.map { pack ->
+            QueryProductDetailsParams.Product.newBuilder()
+                .setProductId(pack.productId)
+                .setProductType(BillingClient.ProductType.INAPP)
+                .build()
+        }
+        val params = QueryProductDetailsParams.newBuilder()
+            .setProductList(products)
+            .build()
+        billingClient.queryProductDetailsAsync(params) { result, queryResult ->
+            if (result.responseCode == BillingClient.BillingResponseCode.OK) {
+                productDetails = queryResult.productDetailsList.associateBy { it.productId }
+                publishOffers()
+            } else {
+                productDetails = emptyMap()
+                publishOffers()
+                _state.update {
+                    it.copy(error = billingMessage(result, "Could not load localized Google Play prices."))
+                }
+            }
+        }
+    }
+
+    private fun publishOffers() {
+        val offers = serverProducts.map { pack ->
+            val details = productDetails[pack.productId]
+            val playOffer = details?.oneTimePurchaseOfferDetailsList?.firstOrNull()
+            CurrencyPackOffer(
+                productId = pack.productId,
+                currency = pack.currency,
+                amount = pack.amount,
+                formattedPrice = playOffer?.formattedPrice,
+                available = playOffer != null
+            )
+        }
+        _state.update { it.copy(offers = offers, loading = false) }
+    }
+
+    private fun queryUnconsumedPurchases() {
+        if (!billingClient.isReady) return
+        val params = QueryPurchasesParams.newBuilder()
+            .setProductType(BillingClient.ProductType.INAPP)
+            .build()
+        billingClient.queryPurchasesAsync(params) { result, purchases ->
+            if (result.responseCode == BillingClient.BillingResponseCode.OK) {
+                purchases.forEach(::processPurchase)
+            }
+        }
+    }
+
+    private fun processPurchase(purchase: Purchase) {
+        when (purchase.purchaseState) {
+            Purchase.PurchaseState.PENDING -> {
+                _state.update {
+                    it.copy(
+                        purchasingProductId = null,
+                        notice = "Google Play purchase pending. Currency will arrive after payment completes."
+                    )
+                }
+            }
+            Purchase.PurchaseState.PURCHASED -> {
+                val knownProducts = purchase.products.filter { productId ->
+                    serverProducts.any { it.productId == productId }
+                }
+                if (knownProducts.isEmpty()) return
+                knownProducts.forEach { productId -> verifyThenConsume(productId, purchase) }
+            }
+            else -> _state.update { it.copy(purchasingProductId = null) }
+        }
+    }
+
+    private fun verifyThenConsume(productId: String, purchase: Purchase) {
+        val token = prefs.sessionToken ?: return
+        scope.launch {
+            when (val outcome = commerceApi.verifyGooglePlayPurchase(
+                token = token,
+                productId = productId,
+                purchaseToken = purchase.purchaseToken
+            )) {
+                is AuthOutcome.Ok -> {
+                    val grant = outcome.value
+                    _state.update {
+                        it.copy(
+                            purchasingProductId = null,
+                            notice = if (grant.duplicate) {
+                                "Purchase was already credited; finalizing Google Play receipt."
+                            } else {
+                                "Added ${grant.grantedAmount} ${grant.currency ?: "currency"}."
+                            },
+                            error = null
+                        )
+                    }
+                    onVerifiedGrant?.invoke()
+                    consume(purchase.purchaseToken)
+                }
+                is AuthOutcome.Invalid -> _state.update {
+                    it.copy(
+                        purchasingProductId = null,
+                        error = outcome.message ?: "Google Play purchase could not be verified."
+                    )
+                }
+                is AuthOutcome.Failed -> _state.update {
+                    it.copy(purchasingProductId = null, error = outcome.message)
+                }
+            }
+        }
+    }
+
+    private fun consume(purchaseToken: String) {
+        if (!billingClient.isReady) return
+        val params = ConsumeParams.newBuilder()
+            .setPurchaseToken(purchaseToken)
+            .build()
+        billingClient.consumeAsync(params) { result, _ ->
+            if (result.responseCode != BillingClient.BillingResponseCode.OK) {
+                // The Railway receipt is idempotent. If consumption fails, this
+                // unconsumed purchase is discovered again on the next refresh,
+                // Railway returns duplicate=true, and consumption is retried.
+                Log.w(TAG, "Play consume failed: ${result.debugMessage}")
+            }
+        }
+    }
+
+    private fun billingMessage(result: BillingResult, fallback: String): String =
+        result.debugMessage.takeIf { it.isNotBlank() } ?: fallback
+
+    private companion object {
+        const val TAG = "PlayBilling"
+    }
+}
