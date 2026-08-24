@@ -1,353 +1,483 @@
 # Quiz Royale Showdown
 
-**Quiz Royale Showdown** is a real-time multiplayer trivia battle royale where players compete in fast-paced quiz matches, earn rewards, climb leaderboards, unlock cosmetics, use power-ups, and compete across seasons.
+Quiz Royale Showdown is a cross-platform, real-time multiplayer trivia battle royale built around fast quiz rounds, persistent progression, social features, cosmetics, seasons, power-ups, virtual currency, and server-authoritative multiplayer.
 
-The project combines an **Android client**, **Cloudflare Workers / Durable Objects**, a **Railway-hosted API**, **PostgreSQL**, and **Redis** to provide real-time multiplayer gameplay with persistent player progression.
+The current application consists of:
 
-## Features
+- a native Android client built with Kotlin and Jetpack Compose;
+- a React + TypeScript + Vite web client;
+- a Railway-hosted Node.js/TypeScript API;
+- PostgreSQL for persistent game/account/economy data;
+- Redis for caching and coordination;
+- Cloudflare Workers + Durable Objects for low-latency matchmaking and live WebSocket game rooms;
+- Google Play Billing for optional Android coin and gem purchases.
 
-- Real-time multiplayer trivia matches
-- Quick Match matchmaking
-- Tournament and Practice game modes
-- Guest and registered player support
-- JWT-based authentication
-- Secure room tickets for multiplayer sessions
-- WebSocket gameplay
-- Timed trivia rounds
-- Difficulty-based question selection
-- Player elimination and match results
-- Global leaderboard
-- Friends system
-- Player profiles
-- XP and progression
-- Seasons
-- Cosmetics
-- Store system
-- Power-ups and player inventory
-- Match reporting
-- Redis-backed caching and coordination
-- PostgreSQL persistence
-- Railway deployment
-- Cloudflare Durable Objects for real-time game rooms
+The primary integration branch is `Railway-API-Implementation`.
 
 ---
 
-## Architecture
+## Project Links
+
+- Repository: `https://github.com/adaPlu/quiz-royale-showdown`
+- Web app: `https://quiz-royale-showdown.pages.dev`
+- Google Play package: `com.rork.quizroyaleshowdown`
+- Railway production API: `https://railway-api-production-5772.up.railway.app`
+- Cloudflare multiplayer Worker: `https://quiz-royale-functions.adapluguez.workers.dev`
+
+A custom production web origin may also be deployed through the prepared Cloudflare Pages release workflow.
+
+---
+
+## Current Android Version
 
 ```text
-┌─────────────────────────────┐
-│       Android Client        │
-│      Kotlin / Compose       │
-└──────────────┬──────────────┘
-               │
-               │ HTTPS / WebSocket
-               ▼
-┌─────────────────────────────┐
-│     Cloudflare Worker       │
-│                             │
-│  • Matchmaking              │
-│  • Room tickets             │
-│  • WebSocket routing        │
-│  • Identity validation      │
-└──────────────┬──────────────┘
-               │
-               ▼
-┌─────────────────────────────┐
-│      Durable Objects        │
-│                             │
-│  Real-time match state      │
-│  Round synchronization      │
-│  Player connections         │
-└──────────────┬──────────────┘
-               │ Internal API
-               ▼
-┌─────────────────────────────┐
-│        Railway API          │
-│     Node.js / TypeScript    │
-│                             │
-│  • Authentication           │
-│  • Questions                │
-│  • Friends                  │
-│  • Leaderboards             │
-│  • Seasons                  │
-│  • Store                    │
-│  • Player progression       │
-└──────────┬─────────┬────────┘
-           │         │
-           ▼         ▼
-     PostgreSQL    Redis
+applicationId: com.rork.quizroyaleshowdown
+versionName:   1.3
+versionCode:   3
+minSdk:        26
+targetSdk:     36
+compileSdk:    36
 ```
 
 ---
 
-## Tech Stack
+# Features
 
-### Android
+## Multiplayer
 
-- Kotlin
-- Jetpack Compose
-- Android Studio
-- REST APIs
-- WebSockets
+- Real-time trivia matches over WebSockets
+- Cloudflare Durable Object match rooms
+- Quick, Tournament, and Practice modes
+- Signed room tickets
+- Browser-safe short-lived socket tickets
+- Server-authoritative game state
+- Timed rounds
+- Answer submission and reveal
+- Score, streak, lives, placement, and standings
+- Reconnect handling
+- Match join timeout/watchdog behavior
+- Keyboard answer controls on web
+- Cross-platform Android/web protocol support
 
-### Backend
+## Accounts and Sessions
 
-- Node.js
-- TypeScript
-- PostgreSQL
-- Redis
-- REST APIs
-- JWT authentication
+- Registered accounts
+- Guest sessions
+- Guest session heartbeat and expiry handling
+- Guest-to-account registration flow
+- Persistent registered sessions
+- Player identity validation on protected routes
+- Server-side authorization
 
-### Multiplayer Infrastructure
+## Player Progression
 
-- Cloudflare Workers
-- Cloudflare Durable Objects
-- WebSockets
+- XP and player statistics
+- Match rewards
+- Persistent virtual currency balances
+- Coins
+- Gems
+- Seasonal tickets
+- Seasonal progression
+- Free and premium season milestones
+- Retroactive premium rewards after purchasing a season pass
 
-### Deployment
+## Store and Economy
 
-- Railway
-- Cloudflare
-- GitHub
+- Server-authoritative Store catalog
+- Power-up purchases
+- Season pass purchases
+- Cosmetic unlocks
+- Cosmetic ownership
+- Cosmetic equip state
+- Paid Android currency packs through Google Play Billing
+- Server-side Google Play receipt verification
+- Idempotent paid-currency grants
+- Server-side Play consumption after entitlement grant
+
+## Cosmetics
+
+Current cosmetic support includes ownership/equip handling for profile presentation types such as:
+
+- avatar frames;
+- banners;
+- titles;
+- badges.
+
+The Android Store implements a full progression flow:
+
+```text
+LOCKED -> UNLOCK -> OWNED -> EQUIP -> EQUIPPED
+```
+
+Equipped cosmetics are also represented on the Android profile UI.
+
+## Social
+
+- Friend search
+- Friend invitations
+- Accept / decline / cancel invitation
+- Friend removal
+- Player profiles
+- Leaderboards
+
+## Web Client
+
+The browser client provides persistent navigation across:
+
+```text
+HOME / PLAY / STORE / SEASON / PROFILE
+```
+
+It supports:
+
+- registered and guest identities;
+- matchmaking;
+- live multiplayer;
+- Store;
+- cosmetics;
+- seasons;
+- leaderboards;
+- friends;
+- responsive desktop/mobile layouts;
+- accessibility improvements;
+- reduced-motion handling;
+- loading/error states;
+- optional telemetry hooks.
 
 ---
 
-## Repository Structure
+# High-Level Architecture
+
+```text
+                       +----------------------+
+                       |      Android App     |
+                       | Kotlin / Jetpack     |
+                       | Compose / Billing    |
+                       +----------+-----------+
+                                  |
+                                  | HTTPS
+                                  |
+               +------------------+------------------+
+               |                                     |
+               v                                     v
+     +--------------------+                +--------------------+
+     |    Railway API     |                | Cloudflare Worker  |
+     | Node / TypeScript  |                | Matchmaking/Auth   |
+     +---------+----------+                +----------+---------+
+               |                                      |
+         +-----+-----+                                |
+         |           |                                v
+         v           v                     +--------------------+
+   +-----------+ +---------+                | Durable Objects    |
+   |PostgreSQL | |  Redis  |                | Live match rooms   |
+   +-----------+ +---------+                +--------------------+
+
+
+                       +----------------------+
+                       |       Web App        |
+                       | React / TS / Vite    |
+                       +----------+-----------+
+                                  |
+                         HTTPS / WebSocket
+                                  |
+                      Railway + Cloudflare
+```
+
+The architecture intentionally separates persistent account/economy operations from low-latency multiplayer state.
+
+---
+
+# Repository Structure
 
 ```text
 quiz-royale-showdown/
-│
-├── android-quiz-royale-showdown/
-│   └── Android application
-│
-├── functions/
-│   ├── Cloudflare Worker
-│   ├── matchmaking
-│   ├── Durable Object game rooms
-│   └── Railway API integration
-│
-├── railway-api/
-│   ├── src/
-│   ├── migrations/
-│   ├── tests/
-│   └── package.json
-│
-├── webapp/
-│   └── Web-facing application resources
-│
-├── railway.json
-├── package.json
-└── README.md
+|
+|-- .github/
+|   `-- workflows/
+|       |-- ui-web-test.yml
+|       |-- deploy-web-pages.yml
+|       `-- release-web-production.yml
+|
+|-- android-quiz-royale-showdown/
+|   |-- app/
+|   |   `-- src/main/java/com/rork/quizroyaleshowdown/
+|   |       |-- data/
+|   |       `-- ui/
+|   |-- gradle/
+|   `-- gradlew / gradlew.bat
+|
+|-- functions/
+|   |-- index.ts
+|   |-- match-room.ts
+|   |-- matchmaker.ts
+|   |-- room-ticket.ts
+|   |-- cors-policy.ts
+|   |-- tests
+|   `-- wrangler.toml
+|
+|-- railway-api/
+|   |-- migrations/
+|   |-- src/
+|   |   |-- app.ts
+|   |   |-- server.ts
+|   |   |-- commerce.ts
+|   |   |-- identity.ts
+|   |   |-- db.ts
+|   |   `-- tests
+|   `-- package.json
+|
+|-- webapp/
+|   |-- src/
+|   |-- tests/
+|   |-- playwright.config.ts
+|   |-- vite.config.ts
+|   `-- package.json
+|
+|-- docs/
+|-- railway.json
+|-- rork.json
+|-- package.json
+`-- README.md
 ```
 
 ---
 
-# Gameplay
+# Technology Stack
 
-Players enter matchmaking and are assigned to a multiplayer trivia room.
+## Android
 
-Each game consists of a sequence of timed questions. Players submit answers before the timer expires and the server evaluates each response.
+- Kotlin
+- Jetpack Compose
+- Material 3
+- Android Navigation Compose
+- Ktor client
+- Kotlin serialization
+- Coil
+- Koin
+- AndroidX Security Crypto
+- Google Play Billing Library
 
-Depending on the game mode, incorrect answers, score, timing, and other game rules determine player progression or elimination.
+## Web
 
-At the end of a match, player statistics and progression are persisted.
+- React
+- TypeScript
+- Vite
+- Playwright
+- Lucide React
+
+## Railway API
+
+- Node.js
+- TypeScript
+- PostgreSQL (`pg`)
+- Redis
+- Zod
+- REST APIs
+
+## Multiplayer
+
+- Cloudflare Workers
+- Durable Objects
+- WebSockets
+- Wrangler
+
+## Infrastructure
+
+- Railway
+- PostgreSQL
+- Redis
+- Cloudflare Pages
+- Cloudflare Workers
+- GitHub Actions
+- Google Play Console / Android Publisher API
+
+---
+
+# Gameplay Flow
 
 ```text
 Player
-   │
-   ▼
+  |
+  v
+Choose mode
+  |
+  v
 Matchmaking
-   │
-   ▼
-Room Created
-   │
-   ▼
-Players Join
-   │
-   ▼
-Question
-   │
-   ▼
-Answers Submitted
-   │
-   ▼
-Results
-   │
-   ├── Next Round ──► Question
-   │
-   └── Match Complete
-              │
-              ▼
-       Rewards / XP / Stats
+  |
+  v
+Receive room assignment + signed room ticket
+  |
+  v
+Join Durable Object match room
+  |
+  v
+Receive authoritative STATE
+  |
+  v
+Question round
+  |
+  +--> answer submitted
+  |      |
+  |      v
+  |   reveal / score / standings
+  |      |
+  +------+
+  |
+  v
+Match complete
+  |
+  v
+Railway persists rewards / stats / progression
 ```
+
+The client is never considered authoritative for match results, economy mutations, or account ownership.
 
 ---
 
 # Question System
 
-The production question source of truth is the PostgreSQL:
-
-```text
-QuestionBank
-```
-
-The application does **not** use a separate lowercase `questions` table.
-
-`QuestionBank` currently contains more than **4,400 trivia questions** covering multiple difficulty levels.
+Production trivia questions are stored in PostgreSQL in the existing `QuestionBank` source of truth.
 
 Questions support:
 
-- Easy
-- Medium
-- Hard
-- Multiple answer choices
-- Correct-answer tracking
-- Category information
-- Active/inactive state
-- Question usage tracking
+- categories;
+- easy / medium / hard difficulty;
+- multiple answer choices;
+- correct-answer tracking;
+- active/inactive state;
+- usage metadata.
 
-The Railway API selects questions from `QuestionBank` when multiplayer games request a new question set.
-
-Generated questions are also stored directly in `QuestionBank`.
+The Railway API supplies question sets to the multiplayer system rather than relying on a client-side question bank.
 
 ---
 
-# Matchmaking
+# Authentication and Identity
 
-Matchmaking is coordinated by the Cloudflare Worker.
+Quiz Royale supports registered users and guest identities.
 
-The basic flow is:
+Important security rules:
+
+1. Clients do not get to declare arbitrary authoritative player identities.
+2. Protected Railway routes authenticate the current account server-side.
+3. Multiplayer joins use server-issued room/socket tickets.
+4. Economy and Store mutations are executed by the backend.
+5. Secrets are deployment configuration and must never be committed to Git.
+
+---
+
+# Store, Currency, and Google Play Billing
+
+Quiz Royale has three persistent virtual currencies:
 
 ```text
-Android Client
-      │
-      ▼
-/matchmake
-      │
-      ▼
-Cloudflare Worker
-      │
-      ▼
-Match Assignment
-      │
-      ▼
-Signed Room Ticket
-      │
-      ▼
-Durable Object
-      │
-      ▼
-WebSocket Match
+coins
+gems
+seasonalTickets
 ```
 
-Room tickets prevent clients from simply supplying arbitrary player identities when joining game rooms.
+Coins and gems can be earned in gameplay and can also be used for Store purchases.
 
----
+Android additionally supports optional real-money Google Play purchases for coin/gem packs.
 
-# Authentication
+## Current Google Play Product IDs
 
-Quiz Royale Showdown supports both registered users and guests.
+```text
+quiz_coins_500   -> 500 coins
+quiz_coins_1200  -> 1200 coins
+quiz_gems_50     -> 50 gems
+quiz_gems_140    -> 140 gems
+```
 
-Registered player sessions use authentication tokens when communicating with protected API endpoints.
+The application intentionally does not hard-code real-money prices. Google Play supplies localized pricing through Billing.
 
-Security controls include:
+## Paid Currency Trust Flow
 
-- JWT authentication
-- Refresh-token handling
-- Internal API authentication
-- Signed multiplayer room tickets
-- Route-level authorization
-- Request validation
-- Rate limiting
-- Server-side identity validation
+```text
+Google Play checkout
+       |
+       v
+Account-bound Play purchase
+       |
+       v
+Android sends purchase token to Railway
+       |
+       v
+Railway verifies purchase with Google Play
+       |
+       +--> purchase state
+       +--> product ID
+       +--> Quiz Royale account binding
+       |
+       v
+Database transaction
+       |
+       +--> replay/duplicate check
+       +--> balance update
+       +--> receipt record
+       +--> currency ledger record
+       |
+       v
+Railway consumes Play purchase
+       |
+       v
+Client refreshes balances
+```
 
-Sensitive credentials and production secrets should always be supplied through deployment environment variables and must never be committed to the repository.
+The Android client does **not** directly grant coins or gems after a Billing callback.
 
----
+## Railway Billing Configuration
 
-# Social Features
+Production Railway billing verification accepts either:
 
-Players can interact through the built-in friends system.
+```env
+GOOGLE_PLAY_SERVICE_ACCOUNT_JSON=
+```
 
-Supported operations include:
+or:
 
-- Send friend requests
-- Accept friend requests
-- View friends
-- Remove friends
-- Player discovery
-- Player profiles
+```env
+GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64=
+```
 
-Friendship operations enforce ownership and authorization server-side.
+Optional package override:
 
----
+```env
+GOOGLE_PLAY_PACKAGE_NAME=com.rork.quizroyaleshowdown
+```
 
-# Player Progression
+If no override is provided, the backend defaults to `com.rork.quizroyaleshowdown`.
 
-Player progression is persisted between games.
-
-The backend supports data such as:
-
-- XP
-- Player statistics
-- Match history/results
-- Leaderboard rankings
-- Seasonal progression
-- Cosmetics
-- Power-ups
-- Inventory
+Before real-money transactions can work, the four products must exist and be active in Google Play Console and the Railway service account must have Android Publisher access.
 
 ---
 
 # Seasons
 
-Quiz Royale Showdown supports seasonal competition.
+The season system supports:
 
-Seasons provide a foundation for:
+- active season metadata;
+- per-player season progress;
+- normal level progression;
+- seasonal tickets;
+- milestone rewards;
+- free rewards;
+- premium rewards;
+- season-pass entitlement;
+- retroactive premium reward grants.
 
-- Seasonal rankings
-- Seasonal progression
-- Rewards
-- Time-limited competition
-- Future seasonal content
-
----
-
-# Store and Cosmetics
-
-Players can obtain and manage cosmetic content through the store system.
-
-The backend provides support for:
-
-- Store items
-- Cosmetics
-- Player inventory
-- Purchases
-- Item ownership
-
-The design keeps purchasing and inventory state server-authoritative.
+Season milestone grants are server-authoritative and recorded through the currency ledger so retries do not intentionally duplicate rewards.
 
 ---
 
-# Power-Ups
+# Cosmetics
 
-Players can acquire and use power-ups during gameplay.
+Cosmetics are stored separately from Store SKUs so ownership/equip state can be managed independently of pricing.
 
-Power-up state is stored in the player's inventory and validated by the backend rather than trusting client-side state.
+A cosmetic Store SKU unlocks its cosmetic ID. After ownership is established, the player can equip it.
 
----
+The current migration also ensures the `Early Challenger` title has an obtainable Store SKU.
 
-# Leaderboards
-
-Quiz Royale Showdown maintains persistent leaderboard information using player statistics stored in PostgreSQL.
-
-Leaderboard information can be used for:
-
-- Global ranking
-- Seasonal ranking
-- Player comparison
-- Competitive progression
+Production-quality unique cosmetic artwork remains an area for continued visual polish; the application already has the ownership/equip/presentation plumbing required to support those assets.
 
 ---
 
@@ -355,82 +485,164 @@ Leaderboard information can be used for:
 
 ## Prerequisites
 
-Install:
+Recommended local tools:
 
 - Git
-- Node.js
+- Node.js 22+
 - npm
+- JDK 17 for CI parity
 - Android Studio
-- Java/JDK required by the Android project
-- PostgreSQL
+- Android SDK
+- PostgreSQL 16+
 - Redis
+- Wrangler
 
-Cloudflare development additionally requires Wrangler.
+Install Wrangler globally only if desired:
 
 ```bash
 npm install -g wrangler
 ```
 
+Using the project-local Wrangler dependency through `npx` is also supported.
+
 ---
 
-## Clone the Repository
+## Clone
 
 ```bash
-git clone https://github.com/adaPlu/rork-quiz-royale-showdown.git
-cd rork-quiz-royale-showdown
+git clone https://github.com/adaPlu/quiz-royale-showdown.git
+cd quiz-royale-showdown
+git switch Railway-API-Implementation
+```
+
+If your existing clone still references the former repository name, update it with:
+
+```bash
+git remote set-url origin https://github.com/adaPlu/quiz-royale-showdown.git
+git fetch origin --prune
 ```
 
 ---
 
-# Railway API
+# Railway API Development
 
 Install dependencies:
 
 ```bash
-cd railway-api
-npm install
+npm ci --prefix railway-api
 ```
 
-Build the API:
+Build:
 
 ```bash
-npm run build
+npm run build --prefix railway-api
 ```
 
-Run the tests:
+Apply migrations after building:
 
 ```bash
-npm test
-```
-
-Start the API using the development command configured in `railway-api/package.json`.
-
----
-
-# Cloudflare Worker
-
-Move into the Worker project:
-
-```bash
-cd functions
-npm install
+npm run migrate --prefix railway-api
 ```
 
 Run tests:
 
 ```bash
-npm test
+npm test --prefix railway-api
 ```
 
-Start the local Cloudflare development environment:
+Start the compiled API:
 
 ```bash
+npm start --prefix railway-api
+```
+
+Typical development environment variables include:
+
+```env
+DATABASE_URL=
+REDIS_URL=
+PORT=3000
+NODE_ENV=development
+```
+
+Production may additionally require authentication/internal-service and billing configuration.
+
+---
+
+# Cloudflare Worker Development
+
+Install dependencies:
+
+```bash
+npm ci --prefix functions
+```
+
+Run Worker tests and TypeScript validation:
+
+```bash
+npm test --prefix functions
+```
+
+Run locally:
+
+```bash
+cd functions
 npx wrangler dev
+```
+
+Deploy manually when correctly authenticated:
+
+```bash
+cd functions
+npm run deploy
+```
+
+Do not overwrite production dashboard secrets/vars unintentionally.
+
+---
+
+# Web Development
+
+Install:
+
+```bash
+npm install --prefix webapp
+```
+
+Run development server:
+
+```bash
+npm run dev --prefix webapp
+```
+
+Production build:
+
+```bash
+npm run build --prefix webapp
+```
+
+Typecheck:
+
+```bash
+npm run typecheck --prefix webapp
+```
+
+Install Playwright browsers:
+
+```bash
+cd webapp
+npx playwright install --with-deps chromium firefox webkit
+```
+
+Run browser smoke tests:
+
+```bash
+npm run test:e2e --prefix webapp
 ```
 
 ---
 
-# Android Application
+# Android Development
 
 Open:
 
@@ -438,253 +650,359 @@ Open:
 android-quiz-royale-showdown/
 ```
 
-with Android Studio.
+in Android Studio and let Gradle sync.
 
-Allow Gradle to synchronize the project, select an emulator or physical Android device, and run the application.
+## Unit Tests
 
-Android unit tests can also be executed with Gradle:
+macOS/Linux:
 
 ```bash
-./gradlew :app:testDebugUnitTest
+cd android-quiz-royale-showdown
+./gradlew :app:testDebugUnitTest --stacktrace
 ```
 
-On Windows:
+Windows PowerShell:
 
 ```powershell
-.\gradlew.bat :app:testDebugUnitTest
+cd android-quiz-royale-showdown
+.\gradlew.bat :app:testDebugUnitTest --stacktrace
 ```
 
----
+## Release Endpoint Configuration
 
-# Environment Variables
-
-Production configuration should be provided through Railway and Cloudflare environment variables.
-
-Typical backend configuration includes values for services such as:
+Release builds require the production endpoints to be explicitly supplied through Gradle properties or environment variables:
 
 ```env
-DATABASE_URL=
-REDIS_URL=
-INTERNAL_API_TOKEN=
-JWT_SECRET=
+EXPO_PUBLIC_RAILWAY_API_URL=https://railway-api-production-5772.up.railway.app
+EXPO_PUBLIC_RORK_FUNCTIONS_URL=https://quiz-royale-functions.adapluguez.workers.dev
 ```
 
-Additional configuration may be required depending on the enabled services.
-
-**Never commit real production secrets or `.env` files containing credentials.**
+Debug builds fall back to those current production URLs when values are omitted; release builds intentionally require explicit configuration.
 
 ---
 
 # Database Migrations
 
-Railway API SQL migrations are located in:
+Migrations live in:
 
 ```text
 railway-api/migrations/
 ```
 
-Migrations are used to evolve production database functionality such as:
+The CI pipeline boots PostgreSQL 16 and applies **all migrations** before Railway tests.
 
-- Authentication
-- Questions
-- Player statistics
-- Social features
-- Seasons
-- Store
-- Inventory
+Important migration responsibilities include:
 
-The current application uses the existing PostgreSQL `QuestionBank` table as the authoritative trivia-question source.
+- authentication and user data;
+- social systems;
+- Store and inventory;
+- seasons and rewards;
+- paid currency products;
+- Google Play receipt records;
+- cosmetic catalog repairs.
 
----
-
-# Testing
-
-The project contains automated tests for important backend and multiplayer functionality.
-
-### Railway API
-
-```bash
-npm test --prefix railway-api
-```
-
-### Cloudflare Worker
-
-```bash
-npm test --prefix functions
-```
-
-### Android
-
-```powershell
-cd android-quiz-royale-showdown
-.\gradlew.bat :app:testDebugUnitTest
-```
-
-Tests should be run before production deployment.
+Do not edit an already-applied production migration casually. Prefer a new forward migration for production schema evolution.
 
 ---
 
-# Deployment
+# Automated Testing
 
-## Railway API
-
-The production API is deployed through Railway.
-
-Railway handles:
-
-- Node.js application deployment
-- PostgreSQL
-- Redis
-- Environment configuration
-- Database migrations
-- Service health monitoring
-
-## Cloudflare
-
-Cloudflare hosts the multiplayer edge layer and Durable Objects responsible for live matches.
-
-This separates persistent API/database operations from low-latency real-time room coordination.
-
----
-
-# Security
-
-Security is treated as a server-side responsibility.
-
-Important design principles include:
-
-- Never trust player IDs supplied directly by clients.
-- Authenticate protected API routes.
-- Perform authorization separately from authentication.
-- Verify multiplayer room tickets.
-- Keep game state server-authoritative.
-- Validate request bodies.
-- Rate-limit sensitive endpoints.
-- Keep internal API endpoints protected.
-- Store secrets only in environment configuration.
-- Prevent unauthorized users from modifying another player's resources.
-
----
-
-# Production Flow
+The primary workflow is:
 
 ```text
-                   ┌──────────────┐
-                   │   Android    │
-                   │    Client    │
-                   └──────┬───────┘
-                          │
-                 HTTPS / WebSocket
-                          │
-             ┌────────────▼────────────┐
-             │    Cloudflare Worker    │
-             │                         │
-             │ Matchmaking / Routing   │
-             └────────────┬────────────┘
-                          │
-                  ┌───────▼────────┐
-                  │ Durable Object │
-                  │   Match Room   │
-                  └───────┬────────┘
-                          │
-                   Internal API
-                          │
-             ┌────────────▼────────────┐
-             │       Railway API       │
-             │    Node / TypeScript    │
-             └───────┬─────────┬───────┘
-                     │         │
-               ┌─────▼───┐ ┌──▼─────┐
-               │Postgres │ │ Redis  │
-               └─────────┘ └────────┘
+.github/workflows/ui-web-test.yml
 ```
 
----
+It contains four verification lanes.
 
-# Current Development Status
+## 1. Web
 
-Quiz Royale Showdown is under active development.
+- dependency install;
+- TypeScript/Vite production build;
+- Playwright browser installation;
+- Chromium smoke tests;
+- Firefox smoke tests;
+- WebKit smoke tests.
 
-Core infrastructure currently includes:
+## 2. Worker
 
-- Android client
-- Production Railway API
-- PostgreSQL database
-- Redis
-- Cloudflare Worker
-- Durable Object multiplayer rooms
-- Authentication
-- Matchmaking
-- Question selection
-- Friends
-- Leaderboards
-- Player progression
-- Seasons
-- Store
-- Cosmetics
-- Power-ups
+- Worker dependency install;
+- Node test suite;
+- TypeScript validation.
 
-Additional gameplay balancing, UI refinement, testing, observability, and production hardening are ongoing.
+## 3. Railway + PostgreSQL
 
----
+- PostgreSQL 16 service container;
+- Railway dependency install;
+- TypeScript build;
+- complete migration application;
+- Railway API tests.
 
-# Roadmap
+## 4. Android
 
-Planned and continuing development includes:
+- JDK setup;
+- Gradle setup;
+- Android debug unit tests.
 
-- Expanded game modes
-- Improved matchmaking
-- Tournament improvements
-- More social functionality
-- Expanded seasonal rewards
-- Additional cosmetics
-- More power-ups
-- Question-bank expansion
-- Improved player statistics
-- Match history
-- Achievement systems
-- Stronger abuse prevention
-- Additional integration and load testing
-- Improved monitoring and observability
+This matrix should be green before integrating gameplay, commerce, authentication, or deployment changes.
 
 ---
 
-# Privacy
+# Production Web Release Workflow
 
-Quiz Royale Showdown stores only the account, gameplay, progression, and service data required to operate the application.
+The repository contains:
 
-A dedicated privacy policy should be provided through the application's Google Play listing and associated public website.
+```text
+.github/workflows/release-web-production.yml
+```
+
+It is intentionally manual (`workflow_dispatch`) and coordinates the web multiplayer release.
+
+Its production sequence is:
+
+```text
+validate credentials
+      |
+      +--> configure Railway CORS
+      |
+      +--> deploy Cloudflare Worker
+      |       `--> verify /websocket-ticket
+      |
+      +--> build/deploy Cloudflare Pages
+      |       `--> attach play.quizroyale.gg
+      |
+      `--> live production sanity
+              |-- Railway health/CORS
+              |-- Worker health/CORS
+              |-- guest creation
+              |-- registration/auth
+              |-- Store
+              |-- cosmetics
+              |-- season
+              |-- leaderboard
+              |-- matchmaking
+              |-- browser socket ticket
+              `-- live WebSocket match join
+```
+
+Required production GitHub secrets include:
+
+```text
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+RAILWAY_TOKEN
+```
+
+or the supported Railway API-token alternative used by the workflow.
+
+---
+
+# Environment and Secret Handling
+
+Never commit real secrets, upload keys, service-account credentials, tokens, or production `.env` files.
+
+Examples of sensitive configuration include:
+
+```text
+DATABASE_URL
+REDIS_URL
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+RAILWAY_TOKEN
+RAILWAY_API_TOKEN
+GOOGLE_PLAY_SERVICE_ACCOUNT_JSON
+GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64
+```
+
+The Android upload keystore and its passwords must remain outside source control.
+
+---
+
+# Security Model
+
+Security-sensitive operations follow several project rules:
+
+- player identity is authenticated server-side;
+- guest identity is validated with server-issued credentials;
+- room tickets protect multiplayer joins;
+- browser socket tickets avoid exposing unsuitable identity material in WebSocket URLs;
+- Store mutations happen server-side;
+- Google Play purchase callbacks never directly credit the local client;
+- Play purchase tokens are verified server-side;
+- Play receipt identity is stored as a digest for replay protection;
+- paid grants execute inside a database transaction;
+- duplicate purchase submission does not intentionally duplicate currency;
+- known browser origins are explicitly handled by CORS policy;
+- native/server clients without browser `Origin` headers remain supported where intended.
+
+---
+
+# Branch Strategy
+
+The active integration branch is:
+
+```text
+Railway-API-Implementation
+```
+
+Feature/repair work should generally follow:
+
+```text
+Railway-API-Implementation
+        |
+        v
+feature-or-repair-branch
+        |
+        v
+build + tests + review
+        |
+        v
+PR back to Railway-API-Implementation
+```
+
+Several historical `agent/*`, audit, build, and deployment-probe branches may remain in the repository. They should not be merged merely because they exist; many were intentionally temporary CI or release-validation branches.
+
+---
+
+# Production Release Checklist
+
+Before an Android/public release, verify at minimum:
+
+- [ ] Web build green
+- [ ] Chromium/Firefox/WebKit smoke tests green
+- [ ] Worker tests green
+- [ ] Railway build/tests green
+- [ ] PostgreSQL migrations green
+- [ ] Android tests green
+- [ ] Production Railway health endpoint healthy
+- [ ] Cloudflare Worker deployed
+- [ ] Browser WebSocket ticket endpoint live
+- [ ] Web origin/CORS correct
+- [ ] Public web client healthy
+- [ ] Android endpoints explicitly configured for release
+- [ ] Release artifact built with the intended signing key
+- [ ] Store/cosmetics/season sanity checked
+- [ ] Live Android multiplayer sanity checked
+- [ ] Google Play products active before paid-currency testing
+- [ ] Railway Google Play service account configured
+- [ ] License-tester purchase verified before enabling paid commerce broadly
+
+---
+
+# Google Play Production Setup Checklist
+
+For paid coins/gems:
+
+1. Create and activate the four exact one-time product IDs in Google Play Console.
+2. Configure regional availability and pricing.
+3. Enable the Google Play Android Developer API for the backend service account.
+4. Grant the service account appropriate Play Console access to Quiz Royale.
+5. Store the service-account JSON only on Railway.
+6. Deploy the Railway configuration.
+7. Add a license tester and internal-test user.
+8. Install the Play-distributed build.
+9. Verify localized prices appear.
+10. Perform a license-tester purchase.
+11. Verify the Railway grant and updated balance.
+12. Restart the app and confirm the receipt is not double-credited.
+
+---
+
+# Known Hardening / Polish Work
+
+The major systems are implemented, but ongoing production hardening still includes:
+
+- Google Play refund/chargeback reconciliation;
+- Real-time Developer Notifications / voided-purchase handling;
+- dedicated adversarial commerce unit/integration tests;
+- release AAB/R8 validation as a permanent CI gate;
+- more production-quality cosmetic artwork and presentation;
+- additional multiplayer/load testing;
+- balancing and economy tuning;
+- broader observability and alerting.
+
+These items should be treated as release-hardening work rather than evidence that the core architecture is absent.
+
+---
+
+# Troubleshooting
+
+## Store shows paid packs as unavailable
+
+Check:
+
+- product IDs exactly match the four configured IDs;
+- products are activated in Google Play Console;
+- the installed build came from an eligible Play testing track;
+- the current Google account is a license tester/test-track user;
+- Railway billing verification is configured;
+- the backend returned a valid account binding.
+
+## Railway reports `billing_not_configured`
+
+Set one of:
+
+```text
+GOOGLE_PLAY_SERVICE_ACCOUNT_JSON
+GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64
+```
+
+and redeploy Railway.
+
+## Railway reports `account_mismatch`
+
+The Play purchase was not attributed to the same Quiz Royale account submitting the receipt. Do not bypass this check; investigate account/test setup.
+
+## Browser cannot join a live match
+
+Check:
+
+- Worker deployment version;
+- `/websocket-ticket` availability;
+- Worker CORS;
+- Railway CORS;
+- room ticket validity;
+- browser WebSocket connectivity.
+
+## Existing local clone still shows old repository URL
+
+```bash
+git remote -v
+git remote set-url origin https://github.com/adaPlu/quiz-royale-showdown.git
+git fetch origin --prune
+```
 
 ---
 
 # Contributing
 
-This project is currently under active development.
+When making changes:
 
-When contributing:
+1. branch from the current integration branch;
+2. keep each branch focused;
+3. update tests when behavior changes;
+4. do not commit credentials or generated secrets;
+5. run the relevant local test lanes;
+6. open a PR to `Railway-API-Implementation`;
+7. inspect CI failures instead of merging around them;
+8. merge only after the affected system graph is green.
 
-1. Create a feature or fix branch.
-2. Keep changes focused.
-3. Add or update tests when behavior changes.
-4. Run the relevant test suites.
-5. Avoid committing secrets or generated build artifacts.
-6. Open a pull request describing the change and how it was tested.
+For economy, authentication, or multiplayer changes, favor server-authoritative behavior and idempotent operations.
 
 ---
 
 # License
 
-Copyright © 2026.
+Copyright © 2026 Adam Pluguez.
 
 All rights reserved unless otherwise specified by the repository owner.
 
 ---
 
-## Author
+# Author
 
 **Adam Pluguez**
 
-GitHub: **adaPlu**
+GitHub: `adaPlu`
 
-Project repository:  
-`adaPlu/rork-quiz-royale-showdown`
+Repository: `adaPlu/quiz-royale-showdown`
