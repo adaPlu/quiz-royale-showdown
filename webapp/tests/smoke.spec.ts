@@ -66,7 +66,7 @@ test("guest sees persistent product navigation and account conversion", async ({
   await expect(page.getByRole("heading", { name: "Account required" })).toBeVisible();
 
   await nav.getByRole("button", { name: "PROFILE" }).click();
-  await expect(page.getByRole("button", { name: "REGISTER", exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "REGISTER", exact: true })).toBeVisible();
 });
 
 test("registered player can open store cosmetics and social panels", async ({ page }) => {
