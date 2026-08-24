@@ -79,6 +79,7 @@ DECLARE
   v_current integer;
   v_next integer;
   v_reference text;
+  v_ledger_id text;
 BEGIN
   IF p_amount IS NULL OR p_amount <= 0 THEN
     RETURN false;
@@ -105,6 +106,7 @@ BEGIN
   v_balances := COALESCE(v_balances, '{}'::jsonb);
   v_current := COALESCE((v_balances ->> p_currency)::integer, 0);
   v_next := v_current + p_amount;
+  v_ledger_id := 'cl-season-' || md5(p_user_id || ':' || p_currency || ':' || v_reference);
 
   UPDATE users
   SET currency_balances = jsonb_set(v_balances, ARRAY[p_currency], to_jsonb(v_next), true)
@@ -113,7 +115,7 @@ BEGIN
   INSERT INTO currency_ledger(
     ledger_id, user_id, currency, delta, balance_after, reason, reference_id, created_at
   ) VALUES (
-    'cl-' || gen_random_uuid()::text,
+    v_ledger_id,
     p_user_id,
     p_currency,
     p_amount,
@@ -224,3 +226,29 @@ DROP TRIGGER IF EXISTS season_pass_retroactive_rewards ON users;
 CREATE TRIGGER season_pass_retroactive_rewards
 AFTER UPDATE OF entitlements ON users
 FOR EACH ROW EXECUTE FUNCTION season_pass_retroactive_reward_trigger();
+
+-- Existing players may already be above one or more milestones. Backfill every
+-- eligible reward exactly once; the ledger uniqueness makes this safe to rerun.
+DO $$
+DECLARE
+  v_progress record;
+  v_has_pass boolean;
+BEGIN
+  FOR v_progress IN
+    SELECT sp.user_id, sp.season_id, sp.level
+    FROM season_progress sp
+    JOIN seasons s ON s.season_id = sp.season_id
+    WHERE s.active = true AND sp.level > 1
+  LOOP
+    SELECT COALESCE((entitlements ->> 'seasonPassAccess')::boolean, false)
+      INTO v_has_pass FROM users WHERE user_id = v_progress.user_id;
+    PERFORM grant_season_rewards_through_level(
+      v_progress.user_id,
+      v_progress.season_id,
+      1,
+      v_progress.level,
+      COALESCE(v_has_pass, false)
+    );
+  END LOOP;
+END;
+$$;
