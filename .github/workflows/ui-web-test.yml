@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   web:
-    name: Web build
+    name: Web build and browser smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,6 +25,11 @@ jobs:
         run: npm install --prefix webapp
       - name: Typecheck and build web app
         run: npm run build --prefix webapp
+      - name: Install Playwright browsers
+        working-directory: webapp
+        run: npx playwright install --with-deps chromium firefox webkit
+      - name: Run cross-browser smoke tests
+        run: npm run test:e2e --prefix webapp
 
   worker:
     name: Worker tests
