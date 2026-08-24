@@ -1,13 +1,18 @@
 import type {
   AuthResult,
+  CosmeticItem,
+  CosmeticsEnvelope,
   CurrentSeasonEnvelope,
+  FriendInvitesEnvelope,
   GameMode,
   GuestSession,
   Identity,
+  LeaderboardPage,
   MatchmakeResponse,
   ServerMessage,
   StoreItemsEnvelope,
   UserProfile,
+  UserSearchResult,
 } from "./types";
 
 export const RAILWAY_API_URL = (import.meta.env.VITE_RAILWAY_API_URL as string | undefined)?.replace(/\/$/, "")
@@ -19,18 +24,30 @@ const TOKEN_KEY = "quizroyale.web.token";
 const GUEST_ID_KEY = "quizroyale.web.guestId";
 const GUEST_SECRET_KEY = "quizroyale.web.guestSecret";
 const GUEST_NAME_KEY = "quizroyale.web.guestName";
+const REQUEST_TIMEOUT_MS = 12_000;
 
 type ApiError = { message?: string; fields?: Record<string, string>; error?: string };
 
 async function jsonRequest<T>(url: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(url, init);
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const failure = body as ApiError;
-    const firstField = Object.values(failure.fields ?? {})[0];
-    throw new Error(firstField ?? failure.message ?? failure.error ?? `Request failed (${response.status})`);
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { ...init, signal: init.signal ?? controller.signal });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const failure = body as ApiError;
+      const firstField = Object.values(failure.fields ?? {})[0];
+      throw new Error(firstField ?? failure.message ?? failure.error ?? `Request failed (${response.status})`);
+    }
+    return body as T;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("The server took too long to respond. Please try again.");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
   }
-  return body as T;
 }
 
 function jsonHeaders(extra: HeadersInit = {}): Headers {
@@ -45,6 +62,10 @@ function identityHeaders(identity: Identity): HeadersInit {
     "X-Guest-Id": identity.guest.guestId,
     "X-Guest-Secret": identity.guest.guestSecret ?? "",
   };
+}
+
+function requireUser(identity: Identity): asserts identity is Extract<Identity, { kind: "user" }> {
+  if (identity.kind !== "user") throw new Error("Register or sign in to use this feature.");
 }
 
 function rememberGuest(guest: GuestSession): Identity {
@@ -158,12 +179,12 @@ export async function refreshIdentity(identity: Identity): Promise<Identity> {
 }
 
 export async function loadStore(identity: Identity): Promise<StoreItemsEnvelope> {
-  if (identity.kind !== "user") throw new Error("Register or sign in to use the Store.");
+  requireUser(identity);
   return jsonRequest(`${RAILWAY_API_URL}/store/items`, { headers: identityHeaders(identity) });
 }
 
 export async function purchaseStoreItem(identity: Identity, itemId: string): Promise<StoreItemsEnvelope> {
-  if (identity.kind !== "user") throw new Error("Register or sign in to purchase items.");
+  requireUser(identity);
   const result = await jsonRequest<{ balances: StoreItemsEnvelope["balances"]; items: StoreItemsEnvelope["items"] }>(
     `${RAILWAY_API_URL}/store/purchase`,
     {
@@ -175,22 +196,88 @@ export async function purchaseStoreItem(identity: Identity, itemId: string): Pro
   return { balances: result.balances, items: result.items };
 }
 
+export async function loadCosmetics(identity: Identity): Promise<CosmeticItem[]> {
+  requireUser(identity);
+  const body = await jsonRequest<CosmeticsEnvelope>(`${RAILWAY_API_URL}/cosmetics`, {
+    headers: identityHeaders(identity),
+  });
+  return body.cosmetics;
+}
+
+export async function equipCosmetic(identity: Identity, cosmeticId: string): Promise<CosmeticItem[]> {
+  requireUser(identity);
+  const body = await jsonRequest<CosmeticsEnvelope>(`${RAILWAY_API_URL}/cosmetics/equip`, {
+    method: "POST",
+    headers: jsonHeaders(identityHeaders(identity)),
+    body: JSON.stringify({ cosmeticId }),
+  });
+  return body.cosmetics;
+}
+
 export async function loadSeason(identity: Identity): Promise<CurrentSeasonEnvelope> {
-  if (identity.kind !== "user") throw new Error("Register or sign in to view seasonal progression.");
+  requireUser(identity);
   return jsonRequest(`${RAILWAY_API_URL}/seasons/current`, { headers: identityHeaders(identity) });
+}
+
+export async function loadFriendInvites(identity: Identity): Promise<FriendInvitesEnvelope> {
+  requireUser(identity);
+  return jsonRequest(`${RAILWAY_API_URL}/friends/invites`, { headers: identityHeaders(identity) });
+}
+
+export async function searchUsers(identity: Identity, query: string): Promise<UserSearchResult[]> {
+  requireUser(identity);
+  const body = await jsonRequest<{ results: UserSearchResult[] }>(
+    `${RAILWAY_API_URL}/users/search?q=${encodeURIComponent(query.trim())}`,
+    { headers: identityHeaders(identity) },
+  );
+  return body.results;
+}
+
+export async function sendFriendInvite(identity: Identity, username: string): Promise<FriendInvitesEnvelope> {
+  requireUser(identity);
+  return jsonRequest(`${RAILWAY_API_URL}/friends/invites`, {
+    method: "POST",
+    headers: jsonHeaders(identityHeaders(identity)),
+    body: JSON.stringify({ username: username.trim() }),
+  });
+}
+
+export async function respondFriendInvite(identity: Identity, inviteId: string, action: "accept" | "decline" | "cancel"): Promise<FriendInvitesEnvelope> {
+  requireUser(identity);
+  return jsonRequest(`${RAILWAY_API_URL}/friends/invites/respond`, {
+    method: "POST",
+    headers: jsonHeaders(identityHeaders(identity)),
+    body: JSON.stringify({ inviteId, action }),
+  });
+}
+
+export async function removeFriend(identity: Identity, userId: string): Promise<UserProfile> {
+  requireUser(identity);
+  const body = await jsonRequest<{ profile: UserProfile }>(`${RAILWAY_API_URL}/friends/remove`, {
+    method: "POST",
+    headers: jsonHeaders(identityHeaders(identity)),
+    body: JSON.stringify({ userId }),
+  });
+  return body.profile;
+}
+
+export async function loadLeaderboardBoards(): Promise<string[]> {
+  const body = await jsonRequest<{ boards: string[] }>(`${RAILWAY_API_URL}/leaderboard/boards`);
+  return body.boards;
+}
+
+export async function loadLeaderboard(board: string, identity?: Identity): Promise<LeaderboardPage> {
+  const subjectId = identity?.kind === "user" ? identity.profile.userId : identity?.guest.guestId;
+  const query = new URLSearchParams({ board, limit: "50" });
+  if (subjectId) query.set("subjectId", subjectId);
+  return jsonRequest(`${RAILWAY_API_URL}/leaderboard?${query.toString()}`);
 }
 
 export async function findMatch(mode: GameMode): Promise<MatchmakeResponse> {
   return jsonRequest(`${MATCH_API_URL}/matchmake?mode=${encodeURIComponent(mode)}`);
 }
 
-export async function exchangeSocketTicket(
-  identity: Identity,
-  match: MatchmakeResponse,
-): Promise<string> {
-  // Revalidate the current credential immediately before binding it to a match.
-  // This prevents a stale browser session from falling through to an untracked
-  // throwaway guest during the Worker-side identity resolution safety net.
+export async function exchangeSocketTicket(identity: Identity, match: MatchmakeResponse): Promise<string> {
   const validatedIdentity = await refreshIdentity(identity);
   const body = await jsonRequest<{ socketTicket: string }>(`${MATCH_API_URL}/websocket-ticket`, {
     method: "POST",
@@ -217,9 +304,7 @@ export async function openMatchSocket(
     name,
   });
   const socket = new WebSocket(`${base}/match/${encodeURIComponent(match.roomId)}?${query.toString()}`);
-  socket.addEventListener("open", () => {
-    socket.send(JSON.stringify({ type: "JOIN_MATCH", name }));
-  });
+  socket.addEventListener("open", () => socket.send(JSON.stringify({ type: "JOIN_MATCH", name })));
   socket.addEventListener("message", (event) => {
     try {
       onMessage(JSON.parse(String(event.data)) as ServerMessage);
