@@ -1,0 +1,260 @@
+name: Release Web Production
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  WEB_ORIGIN: https://play.quizroyale.gg
+  RAILWAY_API_URL: https://railway-api-production-5772.up.railway.app
+  MATCH_API_URL: https://quiz-royale-functions.adapluguez.workers.dev
+  CLOUDFLARE_PAGES_PROJECT: quiz-royale-showdown
+  CLOUDFLARE_PAGES_BRANCH: Railway-API-Implementation
+  RAILWAY_PROJECT_ID: 493c9aa3-2496-4e9c-abff-1cec5c8755c9
+  RAILWAY_ENVIRONMENT_ID: ed846463-c956-4087-a993-8eb72b6ade4a
+  RAILWAY_API_SERVICE_ID: fbd450fb-a31e-4bf7-b106-e780b6ae4765
+
+jobs:
+  credentials:
+    name: Validate release credentials
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+    steps:
+      - name: Validate required secrets
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "::error::Missing CLOUDFLARE_API_TOKEN"; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "::error::Missing CLOUDFLARE_ACCOUNT_ID"; exit 1; }
+          if [ -z "$RAILWAY_TOKEN" ] && [ -z "$RAILWAY_API_TOKEN" ]; then
+            echo "::error::Missing RAILWAY_TOKEN or RAILWAY_API_TOKEN"
+            exit 1
+          fi
+
+  railway-cors:
+    name: Set Railway production CORS
+    needs: credentials
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+    steps:
+      - name: Configure exact browser origin
+        run: |
+          set -euo pipefail
+          if [ -n "$RAILWAY_TOKEN" ]; then unset RAILWAY_API_TOKEN; fi
+          docker run --rm \
+            -e RAILWAY_TOKEN \
+            -e RAILWAY_API_TOKEN \
+            ghcr.io/railwayapp/cli:latest \
+            variable set "CORS_ORIGIN=$WEB_ORIGIN" \
+              --project "$RAILWAY_PROJECT_ID" \
+              --environment "$RAILWAY_ENVIRONMENT_ID" \
+              --service "$RAILWAY_API_SERVICE_ID" \
+              --json
+
+  worker:
+    name: Deploy multiplayer Worker
+    needs: credentials
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Worker dependencies
+        run: npm ci --prefix functions
+      - name: Verify Worker before deploy
+        run: npm test --prefix functions
+      - name: Deploy Worker without overwriting dashboard vars
+        working-directory: functions
+        run: npx wrangler@latest deploy --keep-vars
+      - name: Verify browser socket-ticket route is live
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 18); do
+            STATUS=$(curl -sS -o /tmp/worker-ticket.json -w '%{http_code}' \
+              -X POST "$MATCH_API_URL/websocket-ticket" \
+              -H 'Content-Type: application/json' \
+              --data '{}')
+            if [ "$STATUS" != "404" ]; then
+              echo "Worker websocket-ticket endpoint is live (HTTP $STATUS)"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Deployed Worker still returns 404 for /websocket-ticket"
+          exit 1
+
+  pages:
+    name: Deploy Pages and attach domain
+    needs: [credentials, worker]
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Ensure Pages project exists
+        run: |
+          set -euo pipefail
+          API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects"
+          CODE=$(curl -sS -o /tmp/pages-project.json -w '%{http_code}' \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "$API/$CLOUDFLARE_PAGES_PROJECT")
+          if [ "$CODE" = "404" ]; then
+            curl -fsS -X POST "$API" \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              -H 'Content-Type: application/json' \
+              --data "$(jq -nc --arg name "$CLOUDFLARE_PAGES_PROJECT" --arg branch "$CLOUDFLARE_PAGES_BRANCH" '{name:$name,production_branch:$branch}')" \
+              > /tmp/pages-create.json
+            jq -e '.success == true' /tmp/pages-create.json >/dev/null
+          elif [ "$CODE" != "200" ]; then
+            cat /tmp/pages-project.json
+            exit 1
+          fi
+      - name: Build production web client
+        run: |
+          npm install --prefix webapp
+          npm run build --prefix webapp
+      - name: Deploy Pages bundle
+        working-directory: webapp
+        run: >-
+          npx wrangler@latest pages deploy dist
+          --project-name "$CLOUDFLARE_PAGES_PROJECT"
+          --branch "$CLOUDFLARE_PAGES_BRANCH"
+          --commit-hash "${{ github.sha }}"
+      - name: Attach custom domain
+        run: |
+          set -euo pipefail
+          API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$CLOUDFLARE_PAGES_PROJECT/domains"
+          curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$API" > /tmp/domains.json
+          if ! jq -e --arg domain "play.quizroyale.gg" '.result[]? | select(.name == $domain)' /tmp/domains.json >/dev/null; then
+            curl -fsS -X POST "$API" \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              -H 'Content-Type: application/json' \
+              --data '{"name":"play.quizroyale.gg"}' \
+              > /tmp/domain-create.json
+            jq -e '.success == true' /tmp/domain-create.json >/dev/null
+          fi
+      - name: Wait for public web origin
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            CODE=$(curl -L -sS -o /tmp/web.html -w '%{http_code}' "$WEB_ORIGIN/" || true)
+            if [ "$CODE" = "200" ] && grep -qi 'Quiz Royale' /tmp/web.html; then
+              echo "$WEB_ORIGIN is live"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::$WEB_ORIGIN did not become healthy"
+          exit 1
+
+  sanity:
+    name: Live production release sanity
+    needs: [railway-cors, worker, pages]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify public CORS and production transactions
+        run: |
+          cat > /tmp/release-sanity.mjs <<'EOF'
+          import crypto from 'node:crypto';
+          const railway = process.env.RAILWAY_API_URL;
+          const worker = process.env.MATCH_API_URL;
+          const origin = process.env.WEB_ORIGIN;
+          const assert = (x, m) => { if (!x) throw new Error(m); };
+          async function req(url, init = {}, accepted = [200]) {
+            const response = await fetch(url, init);
+            const text = await response.text();
+            let body = {};
+            try { body = text ? JSON.parse(text) : {}; } catch { body = { raw: text }; }
+            if (!accepted.includes(response.status)) throw new Error(`${init.method ?? 'GET'} ${url} -> ${response.status}: ${text.slice(0,400)}`);
+            return { response, body };
+          }
+
+          let guest;
+          try {
+            const apiHealth = await req(`${railway}/health`, { headers: { Origin: origin } });
+            assert(apiHealth.response.headers.get('access-control-allow-origin') === origin,
+              `Railway CORS is ${apiHealth.response.headers.get('access-control-allow-origin')}`);
+            const workerHealth = await req(`${worker}/health`, { headers: { Origin: origin } });
+            assert(workerHealth.response.headers.get('access-control-allow-origin') === origin,
+              'Worker did not allow production web origin');
+            console.log('CORS PASS');
+
+            const g = await req(`${railway}/guest/session`, {
+              method:'POST', headers:{'Content-Type':'application/json'},
+              body:JSON.stringify({displayName:`WebRelease${Date.now().toString(36).slice(-4)}`})
+            }, [200,201]);
+            guest = g.body.guest;
+            assert(guest?.guestId && guest?.guestSecret, 'guest credentials missing');
+            await req(`${railway}/guest/me`, {headers:{'X-Guest-Id':guest.guestId,'X-Guest-Secret':guest.guestSecret}});
+            console.log('guest PASS');
+
+            const suffix = Date.now().toString(36).slice(-6);
+            const username = `release${suffix}`.slice(0,16);
+            const email = `release+${suffix}@example.com`;
+            const password = `T7!${crypto.randomUUID().replace(/-/g,'').slice(0,14)}a`;
+            const registered = await req(`${railway}/auth/register`, {
+              method:'POST', headers:{'Content-Type':'application/json'},
+              body:JSON.stringify({username,email,password})
+            }, [200,201]);
+            assert(registered.body.token, 'registration token missing');
+            const auth = {Authorization:`Bearer ${registered.body.token}`};
+            await req(`${railway}/auth/me`, {headers:auth});
+            await req(`${railway}/store/items`, {headers:auth});
+            await req(`${railway}/cosmetics`, {headers:auth});
+            await req(`${railway}/seasons/current`, {headers:auth}, [200,404]);
+            await req(`${railway}/leaderboard/boards`);
+            console.log('auth/store/cosmetics/season/leaderboard PASS');
+
+            const mm = await req(`${worker}/matchmake?mode=PRACTICE`);
+            assert(mm.body.roomId && mm.body.roomTicket, 'match room missing');
+            const ticket = await req(`${worker}/websocket-ticket`, {
+              method:'POST',
+              headers:{'Content-Type':'application/json','X-Guest-Id':guest.guestId,'X-Guest-Secret':guest.guestSecret},
+              body:JSON.stringify({roomId:mm.body.roomId,mode:mm.body.mode,roomTicket:mm.body.roomTicket})
+            });
+            assert(ticket.body.socketTicket, 'browser socket ticket missing');
+
+            const wsBase = worker.replace(/^https:/,'wss:').replace(/^http:/,'ws:');
+            const query = new URLSearchParams({mode:mm.body.mode,roomTicket:mm.body.roomTicket,socketTicket:ticket.body.socketTicket,name:guest.displayName});
+            await new Promise((resolve,reject)=>{
+              const ws = new WebSocket(`${wsBase}/match/${encodeURIComponent(mm.body.roomId)}?${query}`);
+              const timer=setTimeout(()=>{ws.close();reject(new Error('authoritative state timeout'));},25000);
+              ws.addEventListener('open',()=>ws.send(JSON.stringify({type:'JOIN_MATCH',name:guest.displayName})));
+              ws.addEventListener('message',(event)=>{
+                let message; try { message=JSON.parse(String(event.data)); } catch { return; }
+                if (['MATCH_STATE','ROUND_STARTED','GAME_OVER'].includes(message.type)) {
+                  clearTimeout(timer); ws.close(); resolve();
+                }
+              });
+              ws.addEventListener('error',()=>{clearTimeout(timer);reject(new Error('live browser WebSocket failed'));});
+            });
+            console.log('browser live match join PASS');
+            await req(`${railway}/auth/logout`, {method:'POST',headers:auth});
+          } finally {
+            if (guest?.guestId && guest?.guestSecret) {
+              await fetch(`${railway}/guest/end`, {method:'POST',headers:{'Content-Type':'application/json','X-Guest-Id':guest.guestId,'X-Guest-Secret':guest.guestSecret},body:'{}'}).catch(()=>{});
+            }
+          }
+          EOF
+          node /tmp/release-sanity.mjs
