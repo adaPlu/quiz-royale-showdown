@@ -116,11 +116,12 @@ fun AppNavigation() {
                     MainNavigationBar(
                         currentRoute = currentRoute,
                         onNavigate = { route ->
-                            if (route == currentRoute) return@MainNavigationBar
-                            navController.navigate(route) {
-                                launchSingleTop = true
-                                restoreState = true
-                                popUpTo(ROUTE_HOME) { saveState = true }
+                            if (route != currentRoute) {
+                                navController.navigate(route) {
+                                    launchSingleTop = true
+                                    restoreState = true
+                                    popUpTo(ROUTE_HOME) { saveState = true }
+                                }
                             }
                         }
                     )
