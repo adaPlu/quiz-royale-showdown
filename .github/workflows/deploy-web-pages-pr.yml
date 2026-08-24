@@ -1,0 +1,86 @@
+name: Web Deployment Probe
+
+on:
+  pull_request:
+    branches:
+      - Railway-API-Implementation
+    paths:
+      - ".deploy-trigger"
+      - ".github/workflows/deploy-web-pages-pr.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: github.head_ref == 'WebDeployTest'
+    name: Deploy web and bind domain
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      PROJECT_NAME: quiz-royale-showdown
+      PRODUCTION_BRANCH: Railway-API-Implementation
+      CUSTOM_DOMAIN: play.quizroyale.gg
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify Cloudflare credentials
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "::error::Missing CLOUDFLARE_API_TOKEN secret"; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "::error::Missing CLOUDFLARE_ACCOUNT_ID secret"; exit 1; }
+
+      - name: Ensure Cloudflare Pages project exists
+        run: |
+          set -euo pipefail
+          API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects"
+          CODE=$(curl -sS -o /tmp/project.json -w '%{http_code}' \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "$API/$PROJECT_NAME")
+          if [ "$CODE" = "404" ]; then
+            curl -fsS -X POST "$API" \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data "$(jq -nc --arg name "$PROJECT_NAME" --arg branch "$PRODUCTION_BRANCH" '{name:$name,production_branch:$branch}')" \
+              > /tmp/project-create.json
+            jq -e '.success == true' /tmp/project-create.json >/dev/null
+          elif [ "$CODE" != "200" ]; then
+            cat /tmp/project.json
+            exit 1
+          fi
+
+      - name: Install and build web app
+        run: |
+          npm install --prefix webapp
+          npm run build --prefix webapp
+
+      - name: Deploy production bundle
+        working-directory: webapp
+        run: >-
+          npx wrangler@latest pages deploy dist
+          --project-name "$PROJECT_NAME"
+          --branch "$PRODUCTION_BRANCH"
+          --commit-hash "${{ github.event.pull_request.head.sha }}"
+
+      - name: Attach play.quizroyale.gg
+        run: |
+          set -euo pipefail
+          API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$PROJECT_NAME/domains"
+          curl -fsS \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "$API" > /tmp/domains.json
+          if ! jq -e --arg domain "$CUSTOM_DOMAIN" '.result[]? | select(.name == $domain)' /tmp/domains.json >/dev/null; then
+            curl -fsS -X POST "$API" \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data "$(jq -nc --arg name "$CUSTOM_DOMAIN" '{name:$name}')" \
+              > /tmp/domain-create.json
+            jq -e '.success == true' /tmp/domain-create.json >/dev/null
+          fi
+          curl -fsS \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "$API/$CUSTOM_DOMAIN" | jq '{success, domain: .result.name, status: .result.status, validation: .result.validation_data}'
