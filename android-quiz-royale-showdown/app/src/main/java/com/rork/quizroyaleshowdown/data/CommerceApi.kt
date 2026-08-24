@@ -32,7 +32,8 @@ data class PaidCurrencyProduct(
 data class CurrencyPacksEnvelope(
     val products: List<PaidCurrencyProduct> = emptyList(),
     val balances: VirtualCurrencyBalances = VirtualCurrencyBalances(),
-    val platform: String = "google_play"
+    val platform: String = "google_play",
+    val accountBinding: String = ""
 )
 
 @Serializable
@@ -43,13 +44,14 @@ data class PlayPurchaseGrant(
     val currency: String? = null,
     val grantedAmount: Int = 0,
     val balances: VirtualCurrencyBalances = VirtualCurrencyBalances(),
-    val consumePurchase: Boolean = false
+    val playFinalized: Boolean = false
 )
 
 /**
  * Paid-currency API surface. Google Play purchase tokens are sent to Railway
  * over TLS and are never written to local storage. Railway independently
- * verifies the token before crediting coins/gems.
+ * verifies the token before crediting coins/gems and finalizes the consumable
+ * with Google Play after the grant is committed.
  */
 class CommerceApi {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
