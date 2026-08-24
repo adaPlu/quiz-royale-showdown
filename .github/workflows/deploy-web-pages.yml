@@ -1,0 +1,40 @@
+name: Deploy Web to Cloudflare Pages
+
+on:
+  workflow_dispatch:
+    inputs:
+      pages_branch:
+        description: "Cloudflare Pages branch label (use the configured production branch for production)"
+        required: true
+        default: "UITest"
+      project_name:
+        description: "Cloudflare Pages project name"
+        required: true
+        default: "quiz-royale-showdown"
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build and deploy web client
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install web dependencies
+        run: npm install --prefix webapp
+      - name: Build production web bundle
+        run: npm run build --prefix webapp
+      - name: Deploy to Cloudflare Pages
+        working-directory: webapp
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: >-
+          npx wrangler@latest pages deploy dist
+          --project-name "${{ inputs.project_name }}"
+          --branch "${{ inputs.pages_branch }}"

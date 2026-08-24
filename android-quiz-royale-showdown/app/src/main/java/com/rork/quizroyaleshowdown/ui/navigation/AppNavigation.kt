@@ -57,10 +57,18 @@ private const val ROUTE_STORE = "store"
 private const val ROUTE_SEASON = "season"
 private const val ROUTE_MATCH = "match/{mode}"
 
-private data class BottomDestination(
+private data class MainDestination(
     val route: String,
     val label: String,
     val icon: ImageVector
+)
+
+private val MAIN_DESTINATIONS = listOf(
+    MainDestination(ROUTE_HOME, "HOME", Icons.Filled.Home),
+    MainDestination(ROUTE_PLAY, "PLAY", Icons.Filled.PlayArrow),
+    MainDestination(ROUTE_STORE, "STORE", Icons.Filled.LocalMall),
+    MainDestination(ROUTE_SEASON, "SEASON", Icons.Filled.Stars),
+    MainDestination(ROUTE_PROFILE, "PROFILE", Icons.Filled.Person)
 )
 
 @Composable
@@ -81,14 +89,11 @@ fun AppNavigation() {
         onPauseOrDispose { authViewModel.onBackground() }
     }
 
-    val bottomDestinations = listOf(
-        BottomDestination(ROUTE_HOME, "Home", Icons.Filled.Home),
-        BottomDestination(ROUTE_PLAY, "Play", Icons.Filled.PlayArrow),
-        BottomDestination(ROUTE_STORE, "Store", Icons.Filled.LocalMall),
-        BottomDestination(ROUTE_SEASON, "Season", Icons.Filled.Stars),
-        BottomDestination(ROUTE_PROFILE, "Profile", Icons.Filled.Person)
-    )
-    val showBottomBar = currentRoute != null && currentRoute != ROUTE_AUTH && currentRoute != ROUTE_MATCH
+    // The persistent main nav is deliberately hidden only for focused auth and
+    // active-match flows. Everywhere else, Store remains one tap away.
+    val showMainNavigation = currentRoute != null &&
+        !currentRoute.startsWith("match") &&
+        !currentRoute.startsWith("auth")
 
     Box(
         modifier = Modifier
@@ -105,41 +110,23 @@ fun AppNavigation() {
             }
     ) {
         Scaffold(
+            modifier = Modifier.fillMaxSize(),
             containerColor = Color.Transparent,
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
             bottomBar = {
-                if (showBottomBar) {
-                    NavigationBar(containerColor = Arena.Surface) {
-                        bottomDestinations.forEach { destination ->
-                            NavigationBarItem(
-                                selected = currentRoute == destination.route,
-                                onClick = {
-                                    if (currentRoute != destination.route) {
-                                        navController.navigate(destination.route) {
-                                            popUpTo(ROUTE_HOME) { saveState = true }
-                                            launchSingleTop = true
-                                            restoreState = true
-                                        }
-                                    }
-                                },
-                                icon = {
-                                    Icon(
-                                        imageVector = destination.icon,
-                                        contentDescription = destination.label
-                                    )
-                                },
-                                label = { Text(destination.label) },
-                                alwaysShowLabel = true,
-                                colors = NavigationBarItemDefaults.colors(
-                                    selectedIconColor = Arena.Ink,
-                                    selectedTextColor = Arena.GoldBright,
-                                    indicatorColor = Arena.Gold,
-                                    unselectedIconColor = Arena.TextLow,
-                                    unselectedTextColor = Arena.TextLow
-                                )
-                            )
+                if (showMainNavigation) {
+                    MainNavigationBar(
+                        currentRoute = currentRoute,
+                        onNavigate = { route ->
+                            if (route != currentRoute) {
+                                navController.navigate(route) {
+                                    launchSingleTop = true
+                                    restoreState = true
+                                    popUpTo(ROUTE_HOME) { saveState = true }
+                                }
+                            }
                         }
-                    }
+                    )
                 }
             }
         ) { contentPadding ->
@@ -247,6 +234,40 @@ fun AppNavigation() {
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun MainNavigationBar(
+    currentRoute: String?,
+    onNavigate: (String) -> Unit
+) {
+    NavigationBar(
+        containerColor = Arena.Canvas,
+        contentColor = Arena.TextHi
+    ) {
+        MAIN_DESTINATIONS.forEach { destination ->
+            val selected = currentRoute == destination.route
+            NavigationBarItem(
+                selected = selected,
+                onClick = { onNavigate(destination.route) },
+                icon = {
+                    Icon(
+                        imageVector = destination.icon,
+                        contentDescription = destination.label
+                    )
+                },
+                label = { Text(destination.label) },
+                alwaysShowLabel = true,
+                colors = NavigationBarItemDefaults.colors(
+                    selectedIconColor = Arena.GoldBright,
+                    selectedTextColor = Arena.GoldBright,
+                    indicatorColor = Arena.Gold.copy(alpha = 0.16f),
+                    unselectedIconColor = Arena.TextLow,
+                    unselectedTextColor = Arena.TextLow
+                )
+            )
         }
     }
 }

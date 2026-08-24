@@ -1,6 +1,7 @@
 package com.rork.quizroyaleshowdown.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -24,121 +26,144 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.rork.quizroyaleshowdown.data.GameMode
+import com.rork.quizroyaleshowdown.data.MODE_INFO
+import com.rork.quizroyaleshowdown.data.ModeInfo
 import com.rork.quizroyaleshowdown.ui.components.ArenaBackground
 import com.rork.quizroyaleshowdown.ui.components.PressableSurface
 import com.rork.quizroyaleshowdown.ui.components.TagChip
 import com.rork.quizroyaleshowdown.ui.theme.Arena
 
+/** Dedicated top-level play destination used by the persistent app navigation. */
 @Composable
 fun PlayScreen(onPlay: (GameMode) -> Unit) {
+    val haptics = LocalHapticFeedback.current
+
     ArenaBackground(accent = Arena.Gold) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .systemBarsPadding()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp)
-                .padding(bottom = 28.dp)
+                .padding(horizontal = 20.dp, vertical = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Spacer(Modifier.height(20.dp))
             Text(
                 text = "PLAY",
-                style = MaterialTheme.typography.headlineLarge,
-                color = Arena.TextHi,
-                fontWeight = FontWeight.W900
+                style = MaterialTheme.typography.displayLarge,
+                color = Arena.GoldBright,
+                fontSize = 38.sp,
+                letterSpacing = 3.sp
             )
-            Spacer(Modifier.height(6.dp))
             Text(
-                text = "Choose a mode and enter the arena.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = Arena.TextLow
+                text = "Choose your arena",
+                style = MaterialTheme.typography.titleMedium,
+                color = Arena.TextMid
             )
-            Spacer(Modifier.height(22.dp))
 
-            ModeEntry(
-                title = "Quick Match",
-                subtitle = "Fast multiplayer trivia with a short lobby.",
-                tag = "QUICK",
-                icon = Icons.Filled.Bolt,
+            Spacer(Modifier.height(2.dp))
+
+            PlayModeCard(
+                info = MODE_INFO.getValue(GameMode.QUICK),
                 accent = Arena.Gold,
-                onClick = { onPlay(GameMode.QUICK) }
+                icon = Icons.Filled.Bolt,
+                onClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onPlay(GameMode.QUICK)
+                }
             )
-            Spacer(Modifier.height(12.dp))
-            ModeEntry(
-                title = "Tournament",
-                subtitle = "Longer elimination format with higher stakes.",
-                tag = "TOURNAMENT",
-                icon = Icons.Filled.EmojiEvents,
+            PlayModeCard(
+                info = MODE_INFO.getValue(GameMode.TOURNAMENT),
                 accent = Arena.Magenta,
-                onClick = { onPlay(GameMode.TOURNAMENT) }
+                icon = Icons.Filled.EmojiEvents,
+                onClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onPlay(GameMode.TOURNAMENT)
+                }
             )
-            Spacer(Modifier.height(12.dp))
-            ModeEntry(
-                title = "Practice",
-                subtitle = "Solo practice without a shared multiplayer lobby.",
-                tag = "PRACTICE",
-                icon = Icons.Filled.School,
+            PlayModeCard(
+                info = MODE_INFO.getValue(GameMode.PRACTICE),
                 accent = Arena.Cyan,
-                onClick = { onPlay(GameMode.PRACTICE) }
+                icon = Icons.Filled.School,
+                onClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onPlay(GameMode.PRACTICE)
+                }
+            )
+
+            Text(
+                text = "Store, Season and Profile stay one tap away until a match begins.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Arena.TextLow,
+                modifier = Modifier.padding(top = 4.dp)
             )
         }
     }
 }
 
 @Composable
-private fun ModeEntry(
-    title: String,
-    subtitle: String,
-    tag: String,
-    icon: ImageVector,
+private fun PlayModeCard(
+    info: ModeInfo,
     accent: Color,
+    icon: ImageVector,
     onClick: () -> Unit
 ) {
     PressableSurface(
         onClick = onClick,
-        modifier = Modifier.fillMaxWidth(),
-        background = Arena.Surface.copy(alpha = 0.72f),
-        borderColor = accent.copy(alpha = 0.5f),
-        shape = RoundedCornerShape(18.dp)
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, accent.copy(alpha = 0.42f), RoundedCornerShape(20.dp)),
+        background = Arena.Surface.copy(alpha = 0.78f),
+        borderColor = Color.Transparent,
+        shape = RoundedCornerShape(20.dp)
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp)
+                .background(accent.copy(alpha = 0.035f))
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Column(
-                modifier = Modifier
-                    .size(46.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(accent.copy(alpha = 0.16f)),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(24.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = accent,
+                    modifier = Modifier.size(28.dp)
+                )
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = info.title,
+                        style = MaterialTheme.typography.titleLarge,
+                        color = Arena.TextHi,
+                        fontWeight = FontWeight.W900
+                    )
+                    Text(
+                        text = info.tagline,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = accent
+                    )
+                }
             }
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = Arena.TextHi,
-                    fontWeight = FontWeight.W800
-                )
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    text = subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Arena.TextLow
-                )
-                Spacer(Modifier.height(8.dp))
-                TagChip(text = tag, color = accent)
+
+            Text(
+                text = info.description,
+                style = MaterialTheme.typography.bodyMedium,
+                color = Arena.TextMid
+            )
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TagChip("${info.rounds} rounds", accent)
+                TagChip("${info.maxPlayers} max", accent)
+                if (info.lives > 0) TagChip("${info.lives} ${if (info.lives == 1) "life" else "lives"}", accent)
             }
         }
     }
