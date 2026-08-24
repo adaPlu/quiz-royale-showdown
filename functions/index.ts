@@ -1,38 +1,4 @@
 // functions/index.ts — Quiz Royale Showdown backend entrypoint.
-//
-// Routes:
-//   GET  /health                              liveness probe
-//   GET  /matchmake?mode=QUICK                returns { roomId, roomTicket } to connect to
-//   POST /websocket-ticket                    browser credential -> short-lived socket ticket
-//   WS   /match/<roomId>?mode                 the authoritative match socket
-//
-//   POST /auth/register                       create a registered account
-//   POST /auth/login                          exchange credentials for a token
-//   POST /auth/logout                         revoke the current token
-//   GET  /auth/me                             the caller's profile + friends
-//   GET  /users/search?q=                     find players to befriend
-//   POST /friends/add | /friends/remove       mutate the friends graph
-//   GET  /friends                             friends + live presence (polled)
-//   POST /presence/ping                       "I am still here" check-in
-//
-//   POST /guest/session                       issue or renew a temporary guest id
-//   POST /guest/heartbeat                     keep a guest id alive
-//   POST /guest/end                           retire a guest id immediately
-//   GET  /guest/me                            read a guest's session stats
-//
-//   GET  /leaderboard?board=WORLD|<category>  ranked board (guests + users)
-//   GET  /leaderboard/boards                  the list of available boards
-//
-// Presence is deliberately friends-only: /friends is the sole way to read it,
-// and it requires a session token, so a player's activity is never public.
-//
-// Identity is resolved HERE, at the edge, before the match socket reaches the
-// room. The room then trusts the `kind` / `playerId` query params because this
-// Worker overwrites whatever the client sent. That keeps the anti-cheat boundary
-// in exactly one place.
-//
-// All DO classes MUST be re-exported here or the bundler tree-shakes them and
-// the platform fails to materialize the instances.
 
 export { MatchRoom } from "./match-room";
 export { Matchmaker } from "./matchmaker";
@@ -76,7 +42,6 @@ const DEFAULT_BROWSER_ORIGINS = [
 const CORS_METHODS = "GET, POST, OPTIONS";
 const CORS_HEADERS = "Content-Type, Authorization, X-Guest-Id, X-Guest-Secret";
 
-/** Path -> DO class routing table for the plain-HTTP endpoints. */
 const HTTP_ROUTES: { pattern: RegExp; className: DoClassName; instance: string; methods: string[] }[] = [
   { pattern: /^\/auth\/(register|login|logout|forgot-password|reset-password)$/, className: "UserDirectory", instance: USER_DIRECTORY_ID, methods: ["POST"] },
   { pattern: /^\/auth\/me$/, className: "UserDirectory", instance: USER_DIRECTORY_ID, methods: ["GET"] },
@@ -96,7 +61,7 @@ export default {
     const origin = request.headers.get("Origin")?.trim() || null;
 
     // Native Android and server-to-server calls normally have no Origin header.
-    // Browser calls must present one of the explicitly approved origins.
+    // Browser calls must come from an explicit allowlisted origin.
     if (origin && !allowedBrowserOrigins(env).has(origin)) {
       return new Response("origin not allowed", { status: 403 });
     }
@@ -121,16 +86,16 @@ export default {
     }
 
     if (url.pathname === "/matchmake" && request.method === "GET") {
-      return await handleMatchmake(request, env, url);
+      return handleMatchmake(request, env, url);
     }
 
     if (url.pathname === "/websocket-ticket" && request.method === "POST") {
-      return await handleWebSocketTicket(request, env);
+      return handleWebSocketTicket(request, env);
     }
 
     const roomMatch = url.pathname.match(/^\/match\/([A-Za-z0-9_-]+)$/);
     if (roomMatch && request.headers.get("Upgrade") === "websocket") {
-      return await handleMatchSocket(request, env, url, roomMatch[1]!);
+      return handleMatchSocket(request, env, url, roomMatch[1]!);
     }
 
     for (const route of HTTP_ROUTES) {
@@ -146,13 +111,10 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
-// ------------------------------------------------------------------ matchmake
-
 async function handleMatchmake(request: Request, env: Env, url: URL): Promise<Response> {
   const mode = parseMode(url.searchParams.get("mode"));
   const cors = corsHeaders(request, env);
 
-  // Practice is solo by definition — no shared lobby, no matchmaker hop.
   if (mode === "PRACTICE") {
     const roomId = `practice-${crypto.randomUUID()}-${Date.now().toString(36)}`;
     const roomTicket = await mintRoomTicket(env, roomId, mode);
@@ -173,26 +135,22 @@ async function handleMatchmake(request: Request, env: Env, url: URL): Promise<Re
   if (!response.ok) {
     const headers = new Headers(cors);
     headers.set("Content-Type", "application/json");
-    return new Response(response.body, {
-      status: response.status,
-      headers,
-    });
+    return new Response(response.body, { status: response.status, headers });
   }
 
-  const body = (await response.json()) as { roomId?: string; mode?: GameMode; playersWaiting?: number; lobbyEndsAt?: number };
+  const body = (await response.json()) as {
+    roomId?: string;
+    mode?: GameMode;
+    playersWaiting?: number;
+    lobbyEndsAt?: number;
+  };
   if (!body.roomId) return Response.json({ error: "matchmake_failed" }, { status: 502, headers: cors });
 
   const roomTicket = await mintRoomTicket(env, body.roomId, parseMode(body.mode ?? mode));
   if (!roomTicket) return Response.json({ error: "match_tickets_unavailable" }, { status: 503, headers: cors });
-
   return Response.json({ ...body, roomTicket }, { status: response.status, headers: cors });
 }
 
-/**
- * Browser WebSockets cannot attach Android's custom auth headers. This exchange
- * happens over normal HTTPS, validates the room assignment, resolves the caller,
- * then mints a two-minute signed identity ticket for the socket handshake.
- */
 async function handleWebSocketTicket(request: Request, env: Env): Promise<Response> {
   const cors = corsHeaders(request, env);
   let body: { roomId?: unknown; mode?: unknown; roomTicket?: unknown };
@@ -213,19 +171,14 @@ async function handleWebSocketTicket(request: Request, env: Env): Promise<Respon
   }
 
   const identity = await resolveIdentity(env, request, new URL(request.url));
-  if (!identity) {
-    return Response.json({ error: "identity_required" }, { status: 401, headers: cors });
-  }
+  if (!identity) return Response.json({ error: "identity_required" }, { status: 401, headers: cors });
 
   const socketTicket = await mintSocketTicket(env, roomId, mode, identity);
   if (!socketTicket) {
     return Response.json({ error: "socket_tickets_unavailable" }, { status: 503, headers: cors });
   }
-
   return Response.json({ socketTicket, expiresInMs: 2 * 60 * 1000 }, { headers: cors });
 }
-
-// --------------------------------------------------------------- match socket
 
 type ResolvedIdentity = {
   kind: SubjectKind;
@@ -244,10 +197,7 @@ async function handleMatchSocket(
   const cors = corsHeaders(request, env);
   const ticket = url.searchParams.get("roomTicket");
   if (!(await verifyRoomTicket(env, ticket, roomId, mode))) {
-    return new Response("invalid match room ticket", {
-      status: 403,
-      headers: cors,
-    });
+    return new Response("invalid match room ticket", { status: 403, headers: cors });
   }
 
   const browserTicket = url.searchParams.get("socketTicket");
@@ -255,26 +205,13 @@ async function handleMatchSocket(
     ? await verifySocketTicket(env, browserTicket, roomId, mode)
     : await resolveIdentity(env, request, url);
   if (!identity) {
-    return new Response("unable to establish an identity for this match", {
-      status: 401,
-      headers: cors,
-    });
+    return new Response("unable to establish an identity for this match", { status: 401, headers: cors });
   }
 
   const target = buildMatchRoomTargetUrl(url.toString(), roomId, mode, identity);
-
-  // 2-arg form: the 1-arg form silently drops the Upgrade header.
   return dispatchToDo(env, "MatchRoom", roomId, new Request(target, request));
 }
 
-/**
- * Turns whatever credential the client presented into a trusted identity.
- *
- * Order matters: a session token always wins over a guest id, so a logged-in
- * player never accidentally banks their match onto a stale guest record. If no
- * usable credential is present we mint a fresh guest rather than refusing —
- * playing without registering must never fail.
- */
 async function resolveIdentity(env: Env, request: Request, url: URL): Promise<ResolvedIdentity | null> {
   const token = bearer(request);
   if (token) {
@@ -284,7 +221,12 @@ async function resolveIdentity(env: Env, request: Request, url: URL): Promise<Re
       { token },
     );
     if (railway) {
-      return { kind: "USER", subjectId: railway.userId, displayName: railway.username, powerUpCharges: railway.powerUpCharges };
+      return {
+        kind: "USER",
+        subjectId: railway.userId,
+        displayName: railway.username,
+        powerUpCharges: railway.powerUpCharges,
+      };
     }
 
     const resolved = await dispatchToDo(
@@ -298,9 +240,13 @@ async function resolveIdentity(env: Env, request: Request, url: URL): Promise<Re
 
     if (resolved?.ok) {
       const body = (await resolved.json()) as { userId: string; username: string; powerUpCharges?: number };
-      return { kind: "USER", subjectId: body.userId, displayName: body.username, powerUpCharges: body.powerUpCharges ?? 0 };
+      return {
+        kind: "USER",
+        subjectId: body.userId,
+        displayName: body.username,
+        powerUpCharges: body.powerUpCharges ?? 0,
+      };
     }
-    // Token was rejected: fall through to guest so a lapsed session still plays.
   }
 
   const guestId = request.headers.get("X-Guest-Id")?.trim() ?? "";
@@ -312,7 +258,12 @@ async function resolveIdentity(env: Env, request: Request, url: URL): Promise<Re
       { headers: { "X-Guest-Id": guestId, "X-Guest-Secret": guestSecret } },
     );
     if (railway) {
-      return { kind: "GUEST", subjectId: railway.guestId, displayName: railway.displayName, powerUpCharges: railway.powerUpCharges };
+      return {
+        kind: "GUEST",
+        subjectId: railway.guestId,
+        displayName: railway.displayName,
+        powerUpCharges: railway.powerUpCharges,
+      };
     }
 
     const resolved = await dispatchToDo(
@@ -325,12 +276,20 @@ async function resolveIdentity(env: Env, request: Request, url: URL): Promise<Re
     ).catch(() => null);
 
     if (resolved?.ok) {
-      const body = (await resolved.json()) as { guestId: string; displayName: string; powerUpCharges?: number };
-      return { kind: "GUEST", subjectId: body.guestId, displayName: body.username ?? body.displayName, powerUpCharges: body.powerUpCharges ?? 0 };
+      const body = (await resolved.json()) as {
+        guestId: string;
+        displayName: string;
+        powerUpCharges?: number;
+      };
+      return {
+        kind: "GUEST",
+        subjectId: body.guestId,
+        displayName: body.displayName,
+        powerUpCharges: body.powerUpCharges ?? 0,
+      };
     }
   }
 
-  // Safety net: issue a throwaway guest so the match still starts.
   const railwayGuest = await callRailwayJson<{ guest: GuestSessionDto }>(
     env,
     "/guest/session",
@@ -368,8 +327,6 @@ async function resolveIdentity(env: Env, request: Request, url: URL): Promise<Re
     powerUpCharges: body.guest.stats.powerUpCharges,
   };
 }
-
-// --------------------------------------------------------------------- plumbing
 
 function dispatchToDo(
   env: Env,
