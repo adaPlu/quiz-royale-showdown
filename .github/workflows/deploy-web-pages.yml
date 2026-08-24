@@ -1,6 +1,5 @@
 name: Deploy Web to Cloudflare Pages
 
-# Deployment trigger refreshed after Cloudflare credentials were configured.
 on:
   push:
     branches:
@@ -52,23 +51,6 @@ jobs:
 
       - name: Build production web bundle
         run: npm run build --prefix webapp
-
-      - name: Ensure Cloudflare Pages project exists
-        shell: bash
-        run: |
-          npx wrangler@latest pages project list --json > pages-projects.json
-          if node <<'NODE'
-          const fs = require('fs');
-          const raw = JSON.parse(fs.readFileSync('pages-projects.json', 'utf8'));
-          const projects = Array.isArray(raw) ? raw : (raw.result || []);
-          process.exit(projects.some((project) => project.name === process.env.PROJECT_NAME) ? 0 : 1);
-          NODE
-          then
-            echo "Cloudflare Pages project '$PROJECT_NAME' already exists."
-          else
-            echo "Creating Cloudflare Pages project '$PROJECT_NAME' with production branch '$PAGES_BRANCH'."
-            npx wrangler@latest pages project create "$PROJECT_NAME" --production-branch "$PAGES_BRANCH"
-          fi
 
       - name: Deploy to Cloudflare Pages
         working-directory: webapp
