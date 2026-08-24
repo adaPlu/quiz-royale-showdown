@@ -137,7 +137,7 @@ export function FriendsPanel({ identity, onIdentity }: { identity: Identity; onI
     setError(null);
     try {
       const profile = await removeFriend(identity, userId);
-      onIdentity({ kind: "user", token: identity.token, profile });
+      onIdentity(identity.kind === "user" ? { ...identity, profile } : identity);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not remove friend.");
     } finally {
