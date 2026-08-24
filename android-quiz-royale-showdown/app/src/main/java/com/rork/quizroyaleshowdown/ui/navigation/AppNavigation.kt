@@ -31,6 +31,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.rork.quizroyaleshowdown.data.AppearanceViewModel
 import com.rork.quizroyaleshowdown.data.AuthViewModel
 import com.rork.quizroyaleshowdown.data.GameMode
 import com.rork.quizroyaleshowdown.data.LeaderboardViewModel
@@ -43,7 +44,7 @@ import com.rork.quizroyaleshowdown.ui.screens.HomeScreen
 import com.rork.quizroyaleshowdown.ui.screens.LeaderboardScreen
 import com.rork.quizroyaleshowdown.ui.screens.MatchScreen
 import com.rork.quizroyaleshowdown.ui.screens.PlayScreen
-import com.rork.quizroyaleshowdown.ui.screens.ProfileScreen
+import com.rork.quizroyaleshowdown.ui.screens.ProfileScreenWithAppearance
 import com.rork.quizroyaleshowdown.ui.screens.SeasonScreen
 import com.rork.quizroyaleshowdown.ui.screens.StoreScreen
 import com.rork.quizroyaleshowdown.ui.theme.Arena
@@ -165,7 +166,6 @@ fun AppNavigation() {
                         viewModel = authViewModel,
                         initialMode = mode,
                         onDone = {
-                            // Land back on the home screen, now signed in.
                             navController.popBackStack(ROUTE_HOME, inclusive = false)
                         },
                         onBack = { navController.popBackStack() }
@@ -173,8 +173,10 @@ fun AppNavigation() {
                 }
 
                 composable(ROUTE_PROFILE) {
-                    ProfileScreen(
+                    val appearanceViewModel: AppearanceViewModel = viewModel()
+                    ProfileScreenWithAppearance(
                         viewModel = authViewModel,
+                        appearanceViewModel = appearanceViewModel,
                         onBack = { navController.popBackStack() },
                         onRegister = { navController.navigate("auth/${AuthMode.REGISTER.name}") }
                     )
@@ -212,11 +214,8 @@ fun AppNavigation() {
                 ) { entry ->
                     val raw = entry.arguments?.getString("mode") ?: GameMode.QUICK.name
                     val mode = runCatching { GameMode.valueOf(raw) }.getOrDefault(GameMode.QUICK)
-                    // Scoped to this destination so leaving the match tears the socket down.
                     val matchViewModel: MatchViewModel = viewModel()
 
-                    // Keep the presence poll alive while the match screen is visible.
-                    // The match room is the only authoritative IN_MATCH writer.
                     LifecycleResumeEffect(mode) {
                         authViewModel.setInMatch(mode)
                         onPauseOrDispose { authViewModel.setInMatch(null) }
@@ -226,8 +225,6 @@ fun AppNavigation() {
                         mode = mode,
                         viewModel = matchViewModel,
                         onExit = {
-                            // Stats are written server-side as the match settles, so pull
-                            // the fresh record before the home screen renders again.
                             authViewModel.refresh()
                             navController.popBackStack(ROUTE_HOME, inclusive = false)
                         }

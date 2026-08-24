@@ -1,5 +1,6 @@
 package com.rork.quizroyaleshowdown.data
 
+import android.app.Activity
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -22,15 +23,23 @@ data class StoreUiState(
 class StoreViewModel(app: Application) : AndroidViewModel(app) {
     private val api = AuthApi()
     private val prefs = PlayerPrefs(app)
+    private val billing = GooglePlayBillingManager(app, prefs)
 
     private val _uiState = MutableStateFlow(StoreUiState())
     val uiState: StateFlow<StoreUiState> = _uiState.asStateFlow()
+    val billingState: StateFlow<BillingStoreState> = billing.state
 
     init {
+        billing.onVerifiedGrant = { refreshStoreData() }
         refresh()
     }
 
     fun refresh() {
+        refreshStoreData()
+        billing.refresh()
+    }
+
+    private fun refreshStoreData() {
         val token = prefs.sessionToken
         if (token == null) {
             _uiState.update {
@@ -85,6 +94,10 @@ class StoreViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun buyCurrency(activity: Activity, offer: CurrencyPackOffer) {
+        billing.launchPurchase(activity, offer.productId)
+    }
+
     fun equip(cosmetic: CosmeticItem) {
         val token = prefs.sessionToken ?: return
         if (_uiState.value.busyItemId != null) return
@@ -112,10 +125,12 @@ class StoreViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearMessages() {
         _uiState.update { it.copy(error = null, notice = null) }
+        billing.clearMessages()
     }
 
     override fun onCleared() {
         super.onCleared()
+        billing.shutdown()
         api.shutdown()
     }
 }

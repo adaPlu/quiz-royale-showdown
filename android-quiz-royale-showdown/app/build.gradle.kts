@@ -97,5 +97,6 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
     implementation(libs.koin.androidx.compose)
+    implementation(libs.google.play.billing)
     debugImplementation(libs.androidx.ui.tooling)
 }

@@ -44,6 +44,7 @@ import com.rork.quizroyaleshowdown.ui.components.TagChip
 import com.rork.quizroyaleshowdown.ui.theme.Arena
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.intOrNull
 
 @Composable
@@ -82,16 +83,26 @@ fun SeasonScreen(
                 return@Column
             }
 
-            SeasonSummary(season, progress)
+            SeasonSummary(season, progress, state.hasSeasonPass)
             Spacer(Modifier.height(22.dp))
             SectionHeader("Reward track")
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "Every level earns 1 seasonal ticket. The milestones below are additional bonuses.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Arena.TextLow
+            )
             Spacer(Modifier.height(10.dp))
             if (season.rewardTrack.isEmpty()) {
                 ErrorCard("No season rewards are configured yet.")
             } else {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     season.rewardTrack.forEach { reward ->
-                        RewardRow(reward = reward, currentLevel = progress.level)
+                        RewardRow(
+                            reward = reward,
+                            currentLevel = progress.level,
+                            hasSeasonPass = state.hasSeasonPass
+                        )
                     }
                 }
             }
@@ -125,7 +136,7 @@ private fun SeasonHeader(onBack: () -> Unit) {
 }
 
 @Composable
-private fun SeasonSummary(season: Season, progress: SeasonProgress) {
+private fun SeasonSummary(season: Season, progress: SeasonProgress, hasSeasonPass: Boolean) {
     val levelProgress = ((progress.xp % 1_000) / 1_000f).coerceIn(0f, 1f)
     Column(
         modifier = Modifier
@@ -139,8 +150,13 @@ private fun SeasonSummary(season: Season, progress: SeasonProgress) {
             Spacer(Modifier.size(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(season.name, style = MaterialTheme.typography.titleLarge, color = Arena.TextHi, fontWeight = FontWeight.W900)
-                Text("Earn XP from ranked matches and wins.", style = MaterialTheme.typography.bodySmall, color = Arena.TextLow)
+                Text("Earn XP from matches and wins.", style = MaterialTheme.typography.bodySmall, color = Arena.TextLow)
             }
+            TagChip(
+                text = if (hasSeasonPass) "pass active" else "free track",
+                color = if (hasSeasonPass) Arena.Gold else Arena.TextLow,
+                filled = hasSeasonPass
+            )
         }
         Spacer(Modifier.height(18.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
@@ -169,9 +185,16 @@ private fun SectionHeader(title: String) {
 }
 
 @Composable
-private fun RewardRow(reward: JsonObject, currentLevel: Int) {
+private fun RewardRow(reward: JsonObject, currentLevel: Int, hasSeasonPass: Boolean) {
     val level = (reward["level"] as? JsonPrimitive)?.intOrNull ?: 1
-    val unlocked = currentLevel >= level
+    val premium = (reward["premium"] as? JsonPrimitive)?.booleanOrNull == true
+    val reachedLevel = currentLevel >= level
+    val unlocked = reachedLevel && (!premium || hasSeasonPass)
+    val status = when {
+        !reachedLevel -> "level $level"
+        premium && !hasSeasonPass -> "pass required"
+        else -> "earned"
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -187,12 +210,19 @@ private fun RewardRow(reward: JsonObject, currentLevel: Int) {
                 modifier = Modifier.size(24.dp)
             )
             Spacer(Modifier.size(10.dp))
-            Text("Level $level", style = MaterialTheme.typography.titleMedium, color = Arena.TextHi, fontWeight = FontWeight.W800)
-            Spacer(Modifier.weight(1f))
-            TagChip(text = if (unlocked) "unlocked" else "locked", color = if (unlocked) Arena.Gold else Arena.TextLow)
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Level $level", style = MaterialTheme.typography.titleMedium, color = Arena.TextHi, fontWeight = FontWeight.W800)
+                if (premium) {
+                    Text("Premium milestone", style = MaterialTheme.typography.labelSmall, color = Arena.Gold)
+                }
+            }
+            TagChip(
+                text = status,
+                color = if (unlocked) Arena.Gold else if (premium) Arena.Violet else Arena.TextLow
+            )
         }
         Spacer(Modifier.height(8.dp))
-        Text(rewardSummary(reward), style = MaterialTheme.typography.bodySmall, color = Arena.TextLow)
+        Text(rewardSummary(reward), style = MaterialTheme.typography.bodySmall, color = Arena.TextMid)
     }
 }
 
@@ -213,7 +243,7 @@ private fun rewardSummary(reward: JsonObject): String {
     val parts = buildList {
         (reward["coins"] as? JsonPrimitive)?.intOrNull?.let { add("$it coins") }
         (reward["gems"] as? JsonPrimitive)?.intOrNull?.let { add("$it gems") }
-        (reward["seasonalTickets"] as? JsonPrimitive)?.intOrNull?.let { add("$it tickets") }
+        (reward["seasonalTickets"] as? JsonPrimitive)?.intOrNull?.let { add("$it bonus tickets") }
     }
     return parts.ifEmpty { listOf("Mystery reward") }.joinToString(", ")
 }

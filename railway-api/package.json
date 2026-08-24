@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/server.js",
+    "start": "node dist/app.js",
     "migrate": "node dist/migrate.js",
     "import:questions": "node dist/import-questions.js",
     "test": "node --test dist/**/*.test.js"

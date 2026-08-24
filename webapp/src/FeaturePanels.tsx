@@ -17,6 +17,7 @@ import type {
   FriendInvitesEnvelope,
   Identity,
   LeaderboardPage,
+  StoreItem,
   UserSearchResult,
 } from "./types";
 import "./feature-panels.css";
@@ -214,7 +215,21 @@ export function FriendsPanel({ identity, onIdentity }: { identity: Identity; onI
   );
 }
 
-export function CosmeticsPanel({ identity }: { identity: Identity }) {
+type CosmeticsPanelProps = {
+  identity: Identity;
+  storeItems?: StoreItem[];
+  purchaseBusyId?: string | null;
+  refreshKey?: number;
+  onPurchase?: (item: StoreItem) => void | Promise<void>;
+};
+
+export function CosmeticsPanel({
+  identity,
+  storeItems = [],
+  purchaseBusyId = null,
+  refreshKey = 0,
+  onPurchase,
+}: CosmeticsPanelProps) {
   const [cosmetics, setCosmetics] = useState<CosmeticItem[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -222,7 +237,7 @@ export function CosmeticsPanel({ identity }: { identity: Identity }) {
   useEffect(() => {
     if (identity.kind !== "user") return;
     loadCosmetics(identity).then(setCosmetics).catch((e: Error) => setError(e.message));
-  }, [identity]);
+  }, [identity, refreshKey]);
 
   if (identity.kind !== "user") return null;
 
@@ -239,26 +254,51 @@ export function CosmeticsPanel({ identity }: { identity: Identity }) {
   }
 
   const owned = cosmetics.filter((item) => item.owned);
+  const storeByCosmetic = new Map(
+    storeItems
+      .filter((item) => item.itemType === "COSMETIC" && typeof item.payload.cosmeticId === "string")
+      .map((item) => [String(item.payload.cosmeticId), item]),
+  );
+
   return (
     <section className="feature-panel" aria-labelledby="cosmetics-title">
       <div className="feature-heading">
         <div><p className="eyebrow">COLLECTION</p><h2 id="cosmetics-title">Cosmetics</h2></div>
         <Sparkles className="violet-text" aria-hidden="true" />
       </div>
+      <p className="muted">Unlock a look with earned currency, then equip it immediately.</p>
       {error && <p className="panel-error" role="alert">{error}</p>}
-      {cosmetics.length === 0 && !error && <p className="muted">No cosmetics unlocked yet.</p>}
+      {cosmetics.length === 0 && !error && <p className="muted">Loading cosmetic catalog…</p>}
       <div className="cosmetic-grid">
-        {cosmetics.map((item) => (
-          <article className={item.equipped ? "arena-card cosmetic-card equipped" : "arena-card cosmetic-card"} key={item.cosmeticId}>
-            <ShieldCheck size={22} aria-hidden="true" />
-            <div><p className="eyebrow">{item.rarity} · {item.cosmeticType}</p><h3>{item.displayName}</h3></div>
-            <button className="small-button" disabled={!item.owned || item.equipped || busy !== null} onClick={() => equip(item.cosmeticId)}>
-              {!item.owned ? "LOCKED" : item.equipped ? "EQUIPPED" : busy === item.cosmeticId ? "EQUIPPING…" : "EQUIP"}
-            </button>
-          </article>
-        ))}
+        {cosmetics.map((item) => {
+          const storeItem = storeByCosmetic.get(item.cosmeticId);
+          const purchaseBusy = purchaseBusyId === storeItem?.itemId;
+          const disabled = busy !== null || purchaseBusyId !== null;
+          return (
+            <article className={item.equipped ? "arena-card cosmetic-card equipped" : "arena-card cosmetic-card"} key={item.cosmeticId}>
+              <div className={`cosmetic-preview ${item.cosmeticType} ${item.rarity}`} aria-hidden="true">
+                <ShieldCheck size={26} />
+                <span>{item.cosmeticType === "title" ? item.displayName : item.cosmeticType.replaceAll("_", " ")}</span>
+              </div>
+              <div><p className="eyebrow">{item.rarity} · {item.cosmeticType.replaceAll("_", " ")}</p><h3>{item.displayName}</h3></div>
+              {item.equipped ? (
+                <button className="small-button" disabled>EQUIPPED</button>
+              ) : item.owned ? (
+                <button className="small-button" disabled={disabled} onClick={() => equip(item.cosmeticId)}>
+                  {busy === item.cosmeticId ? "EQUIPPING…" : "EQUIP"}
+                </button>
+              ) : storeItem && onPurchase ? (
+                <button className="small-button" disabled={disabled} onClick={() => void onPurchase(storeItem)}>
+                  {purchaseBusy ? "PURCHASING…" : `UNLOCK · ${storeItem.price} ${storeItem.currency}`}
+                </button>
+              ) : (
+                <button className="small-button" disabled>NOT CURRENTLY OBTAINABLE</button>
+              )}
+            </article>
+          );
+        })}
       </div>
-      {owned.length > 0 && <p className="muted">Owned {owned.length} / {cosmetics.length}</p>}
+      {cosmetics.length > 0 && <p className="muted">Owned {owned.length} / {cosmetics.length}</p>}
     </section>
   );
 }
