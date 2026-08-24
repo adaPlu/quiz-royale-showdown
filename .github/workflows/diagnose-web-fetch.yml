@@ -1,30 +1,126 @@
-name: Diagnose web fetch
+name: Fix and verify web fetch
 
 on:
   pull_request:
     branches:
       - Railway-API-Implementation
 
+permissions:
+  contents: write
+
 jobs:
-  diagnose:
+  fix-railway-cors:
+    if: github.head_ref == 'agent/diagnose-web-fetch'
     runs-on: ubuntu-latest
     steps:
-      - name: Check browser CORS from deployed Pages origins
+      - uses: actions/checkout@v4
+        with:
+          ref: Railway-API-Implementation
+          fetch-depth: 0
+      - name: Allow Quiz Royale Pages origins on Railway API
         shell: bash
         run: |
-          set -euxo pipefail
-          for ORIGIN in \
-            https://a55e1b76.quiz-royale-showdown.pages.dev \
-            https://quiz-royale-showdown.pages.dev
-          do
-            echo "=== Railway preflight from $ORIGIN ==="
-            curl -sS -D - -o /dev/null -X OPTIONS \
-              'https://railway-api-production-5772.up.railway.app/guest/session' \
-              -H "Origin: $ORIGIN" \
-              -H 'Access-Control-Request-Method: POST' \
-              -H 'Access-Control-Request-Headers: content-type'
-            echo "=== Worker health from $ORIGIN ==="
-            curl -sS -D - -o /dev/null \
-              'https://quiz-royale-functions.adapluguez.workers.dev/health' \
-              -H "Origin: $ORIGIN"
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('railway-api/src/server.ts')
+          text = path.read_text()
+          old = '''const CORS: Record<string, string> = {
+            "Access-Control-Allow-Origin": process.env.CORS_ORIGIN ?? "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Internal-Token, X-Guest-Id, X-Guest-Secret",
+          };'''
+          new = '''const CORS: Record<string, string> = {
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Internal-Token, X-Guest-Id, X-Guest-Secret",
+          };
+
+          const DEFAULT_BROWSER_ORIGINS = new Set([
+            "https://quizroyale.gg",
+            "https://www.quizroyale.gg",
+            "https://play.quizroyale.gg",
+            "https://quiz-royale-showdown.pages.dev",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:4173",
+            "http://127.0.0.1:4173",
+          ]);
+          const PAGES_PROJECT_HOST = "quiz-royale-showdown.pages.dev";
+
+          function corsOriginForRequest(request: http.IncomingMessage): string | null {
+            const rawOrigin = request.headers.origin;
+            if (typeof rawOrigin !== "string" || !rawOrigin.trim()) return "*";
+            const origin = rawOrigin.trim().replace(/\\/$/, "");
+            const configured = [process.env.CORS_ORIGIN, process.env.CORS_ORIGINS]
+              .filter((value): value is string => Boolean(value?.trim()))
+              .flatMap((value) => value.split(","))
+              .map((value) => value.trim().replace(/\\/$/, ""))
+              .filter(Boolean);
+            if (DEFAULT_BROWSER_ORIGINS.has(origin) || configured.includes(origin)) return origin;
+            try {
+              const url = new URL(origin);
+              if (url.protocol === "https:" && url.hostname.endsWith(`.${PAGES_PROJECT_HOST}`)) return origin;
+            } catch {
+              return null;
+            }
+            return null;
+          }'''
+          if old not in text:
+            raise SystemExit('CORS block not found; refusing unsafe edit')
+          text = text.replace(old, new, 1)
+          old_handle = '''export async function handleRequest(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+            try {
+              if (request.method === "OPTIONS") return send(response, 204, null);'''
+          new_handle = '''export async function handleRequest(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+            try {
+              const requestOrigin = typeof request.headers.origin === "string" ? request.headers.origin.trim() : "";
+              const allowedOrigin = corsOriginForRequest(request);
+              if (requestOrigin && !allowedOrigin) {
+                response.writeHead(403);
+                response.end();
+                return;
+              }
+              if (allowedOrigin) response.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+              if (requestOrigin) response.setHeader("Vary", "Origin");
+              if (request.method === "OPTIONS") return send(response, 204, null);'''
+          if old_handle not in text:
+            raise SystemExit('handleRequest block not found; refusing unsafe edit')
+          text = text.replace(old_handle, new_handle, 1)
+          path.write_text(text)
+          PY
+      - name: Commit fix to current production-development branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'adaPlu'
+          git config user.email '70963681+adaPlu@users.noreply.github.com'
+          git add railway-api/src/server.ts
+          if git diff --cached --quiet; then
+            echo 'No Railway CORS change needed.'
+            exit 0
+          fi
+          git commit -m 'Allow Cloudflare Pages origins on Railway API'
+          git push origin HEAD:Railway-API-Implementation
+      - name: Verify live Railway CORS after deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            OK=1
+            for ORIGIN in \
+              https://a55e1b76.quiz-royale-showdown.pages.dev \
+              https://quiz-royale-showdown.pages.dev
+            do
+              ALLOW=$(curl -sS -D - -o /dev/null -X OPTIONS \
+                'https://railway-api-production-5772.up.railway.app/guest/session' \
+                -H "Origin: $ORIGIN" \
+                -H 'Access-Control-Request-Method: POST' \
+                -H 'Access-Control-Request-Headers: content-type' \
+                | awk -F': ' 'tolower($1)=="access-control-allow-origin" {gsub("\\r", "", $2); print $2}')
+              echo "$ORIGIN -> $ALLOW"
+              [ "$ALLOW" = "$ORIGIN" ] || OK=0
+            done
+            [ "$OK" = 1 ] && exit 0
+            sleep 5
           done
+          echo '::error::Railway did not publish the corrected Pages CORS policy.'
+          exit 1
