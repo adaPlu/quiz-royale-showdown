@@ -1,11 +1,17 @@
 name: Deploy Web to Cloudflare Pages
 
+# Temporary PR trigger for deployment verification; do not merge this trigger change.
 on:
   push:
     branches:
       - Railway-API-Implementation
     paths:
       - "webapp/**"
+      - ".github/workflows/deploy-web-pages.yml"
+  pull_request:
+    branches:
+      - Railway-API-Implementation
+    paths:
       - ".github/workflows/deploy-web-pages.yml"
   workflow_dispatch:
     inputs:
