@@ -33,8 +33,10 @@ async function jsonRequest<T>(url: string, init: RequestInit = {}): Promise<T> {
   return body as T;
 }
 
-function jsonHeaders(extra: HeadersInit = {}): HeadersInit {
-  return { "Content-Type": "application/json", ...extra };
+function jsonHeaders(extra: HeadersInit = {}): Headers {
+  const headers = new Headers(extra);
+  headers.set("Content-Type", "application/json");
+  return headers;
 }
 
 function identityHeaders(identity: Identity): HeadersInit {
