@@ -1,0 +1,98 @@
+name: Production Web Deep Sanity
+
+on:
+  pull_request:
+    branches:
+      - Railway-API-Implementation
+    paths:
+      - ".deploy-trigger"
+      - ".github/workflows/production-web-deep-sanity-pr.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  sanity:
+    if: github.head_ref == 'WebDeployTest'
+    name: Live auth store season and socket path
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run deeper production checks
+        env:
+          RAILWAY_API_URL: https://railway-api-production-5772.up.railway.app
+          MATCH_API_URL: https://quiz-royale-functions.adapluguez.workers.dev
+        run: |
+          cat > /tmp/deep-sanity.mjs <<'EOF'
+          import crypto from 'node:crypto';
+          const railway = process.env.RAILWAY_API_URL;
+          const matchApi = process.env.MATCH_API_URL;
+          const ok = (v, m) => { if (!v) throw new Error(m); };
+          async function req(url, init = {}, accepted = [200]) {
+            const r = await fetch(url, init);
+            const text = await r.text();
+            let body = {};
+            try { body = text ? JSON.parse(text) : {}; } catch { body = { raw: text }; }
+            if (!accepted.includes(r.status)) throw new Error(`${init.method ?? 'GET'} ${url} -> ${r.status}: ${text.slice(0, 400)}`);
+            return { r, body };
+          }
+
+          let guest;
+          try {
+            const g = await req(`${railway}/guest/session`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({displayName:`WebCI${Date.now().toString(36).slice(-5)}`}) });
+            guest = g.body.guest;
+            ok(guest?.guestId && guest?.guestSecret, 'guest credentials missing');
+            console.log('guest/session PASS');
+            await req(`${railway}/guest/me`, { headers: {'X-Guest-Id':guest.guestId,'X-Guest-Secret':guest.guestSecret} });
+            console.log('guest/me PASS');
+
+            const suffix = Date.now().toString(36).slice(-6);
+            const username = `webci${suffix}`.slice(0,16);
+            const email = `webci+${suffix}@example.com`;
+            const password = `T7!${crypto.randomUUID().replace(/-/g,'').slice(0,14)}a`;
+            const reg = await req(`${railway}/auth/register`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username,email,password}) });
+            ok(reg.body.token, 'auth/register token missing');
+            const auth = { Authorization:`Bearer ${reg.body.token}` };
+            console.log('auth/register PASS');
+            await req(`${railway}/auth/me`, {headers:auth});
+            console.log('auth/me PASS');
+            await req(`${railway}/store/items`, {headers:auth});
+            console.log('store/items PASS');
+            await req(`${railway}/cosmetics`, {headers:auth});
+            console.log('cosmetics PASS');
+            const season = await req(`${railway}/seasons/current`, {headers:auth}, [200,404]);
+            console.log(`seasons/current PASS status=${season.r.status}`);
+            await req(`${railway}/leaderboard/boards`);
+            console.log('leaderboard/boards PASS');
+
+            const mm = await req(`${matchApi}/matchmake?mode=PRACTICE`);
+            ok(mm.body.roomId && mm.body.roomTicket, 'matchmake room assignment missing');
+            console.log('matchmake PRACTICE PASS');
+
+            const st = await req(`${matchApi}/websocket-ticket`, { method:'POST', headers:{'Content-Type':'application/json','X-Guest-Id':guest.guestId,'X-Guest-Secret':guest.guestSecret}, body:JSON.stringify({roomId:mm.body.roomId,mode:mm.body.mode,roomTicket:mm.body.roomTicket}) });
+            ok(st.body.socketTicket, 'websocket-ticket missing');
+            console.log('websocket-ticket PASS');
+
+            const base = matchApi.replace(/^https:/,'wss:').replace(/^http:/,'ws:');
+            const query = new URLSearchParams({mode:mm.body.mode,roomTicket:mm.body.roomTicket,socketTicket:st.body.socketTicket,name:guest.displayName});
+            await new Promise((resolve,reject)=>{
+              const ws = new WebSocket(`${base}/match/${encodeURIComponent(mm.body.roomId)}?${query}`);
+              const timer=setTimeout(()=>{ws.close();reject(new Error('socket authoritative state timeout'));},25000);
+              ws.addEventListener('open',()=>ws.send(JSON.stringify({type:'JOIN_MATCH',name:guest.displayName})));
+              ws.addEventListener('message',(e)=>{
+                let m; try{m=JSON.parse(String(e.data));}catch{return;}
+                console.log(`WS ${m.type ?? 'UNKNOWN'}`);
+                if(['MATCH_STATE','ROUND_STARTED','GAME_OVER'].includes(m.type)){clearTimeout(timer);ws.close();resolve();}
+              });
+              ws.addEventListener('error',()=>{clearTimeout(timer);reject(new Error('websocket connection failed'));});
+            });
+            console.log('live WebSocket join PASS');
+            await req(`${railway}/auth/logout`, {method:'POST',headers:auth});
+            console.log('auth/logout PASS');
+          } finally {
+            if (guest?.guestId && guest?.guestSecret) await fetch(`${railway}/guest/end`, {method:'POST',headers:{'Content-Type':'application/json','X-Guest-Id':guest.guestId,'X-Guest-Secret':guest.guestSecret},body:'{}'}).catch(()=>{});
+          }
+          EOF
+          node /tmp/deep-sanity.mjs
