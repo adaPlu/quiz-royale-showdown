@@ -55,16 +55,18 @@ test("guest sees persistent product navigation and account conversion", async ({
 
   await page.goto("/");
   await expect(page.getByRole("heading", { name: /QUIZ/i })).toBeVisible();
+  await expect(page.getByText(/Guest session/)).toBeVisible();
+
+  const nav = page.getByRole("navigation", { name: "Primary" });
   for (const destination of ["HOME", "PLAY", "STORE", "SEASON", "PROFILE"]) {
-    await expect(page.getByRole("button", { name: destination })).toBeVisible();
+    await expect(nav.getByRole("button", { name: destination })).toBeVisible();
   }
 
-  await page.getByRole("button", { name: "STORE" }).click();
+  await nav.getByRole("button", { name: "STORE" }).click();
   await expect(page.getByRole("heading", { name: "Account required" })).toBeVisible();
 
-  await page.getByRole("button", { name: "PROFILE" }).click();
-  await expect(page.getByRole("button", { name: /REGISTER/ })).toBeVisible();
-  await expect(page.getByText(/Guest session/)).toBeVisible();
+  await nav.getByRole("button", { name: "PROFILE" }).click();
+  await expect(page.getByRole("button", { name: "REGISTER", exact: true })).toBeVisible();
 });
 
 test("registered player can open store cosmetics and social panels", async ({ page }) => {
@@ -112,12 +114,14 @@ test("registered player can open store cosmetics and social panels", async ({ pa
   }));
 
   await page.goto("/");
-  await page.getByRole("button", { name: "STORE" }).click();
+  const nav = page.getByRole("navigation", { name: "Primary" });
+
+  await nav.getByRole("button", { name: "STORE" }).click();
   await expect(page.getByRole("heading", { name: "STORE" })).toBeVisible();
   await expect(page.getByText("Shield Pack")).toBeVisible();
   await expect(page.getByText("Royal Crest")).toBeVisible();
 
-  await page.getByRole("button", { name: "PROFILE" }).click();
+  await nav.getByRole("button", { name: "PROFILE" }).click();
   await expect(page.getByRole("heading", { name: "Friends" })).toBeVisible();
   await expect(page.getByText("FriendOne")).toBeVisible();
 });
