@@ -26,8 +26,16 @@ type ServiceAccount = {
   private_key: string;
   token_uri?: string;
 };
-
 type ApiResult = { status: number; body: unknown };
+type GrantSuccess = {
+  ok: true;
+  duplicate: boolean;
+  productId: string;
+  currency?: CurrencyKind;
+  grantedAmount?: number;
+  balances: Balances;
+};
+type GrantFailure = { ok: false; status: number; body: unknown };
 
 const PACKAGE_NAME = process.env.GOOGLE_PLAY_PACKAGE_NAME?.trim() || "com.rork.quizroyaleshowdown";
 const MAX_BODY = 32 * 1024;
@@ -91,6 +99,7 @@ export async function handleCommerceRequest(
           })),
           balances: normalizeBalances(user.currency_balances),
           platform: "google_play",
+          accountBinding: accountBinding(user.user_id),
         },
       });
     }
@@ -104,6 +113,10 @@ export async function handleCommerceRequest(
     return finish(response, { status: 405, body: { error: "method_not_allowed" } });
   } catch (error) {
     console.error("commerce request failed", (error as Error)?.message);
+    const statusCode = (error as { statusCode?: number })?.statusCode;
+    if (statusCode === 413) {
+      return finish(response, { status: 413, body: { error: "payload_too_large" } });
+    }
     return finish(response, { status: 500, body: { error: "commerce_internal_error", message: "Purchase verification failed." } });
   }
 }
@@ -135,35 +148,44 @@ async function verifyAndGrant(request: http.IncomingMessage, user: CommerceUser)
       return { status: 409, body: { error: "purchase_already_claimed", message: "That Play purchase belongs to another account." } };
     }
     const fresh = await getCommerceUser(pool, user.user_id);
+    const finalized = await consumeWithGooglePlay(productId, purchaseToken);
     return {
       status: 200,
-      body: { ok: true, duplicate: true, productId, balances: normalizeBalances(fresh?.currency_balances) },
+      body: {
+        ok: true,
+        duplicate: true,
+        productId,
+        balances: normalizeBalances(fresh?.currency_balances),
+        playFinalized: finalized,
+      },
     };
   }
 
-  const play = await verifyWithGooglePlay(productId, purchaseToken);
+  const play = await verifyWithGooglePlay(productId, purchaseToken, accountBinding(user.user_id));
   if (!play.ok) return play.result;
   const quantity = clampPositive(play.purchase.quantity ?? 1, 1, 10);
   const grantedAmount = Number(product.amount) * quantity;
 
-  const grant = await tx(async (client) => {
+  const grant = await tx<GrantSuccess | GrantFailure>(async (client) => {
     const seen = await client.query<{ user_id: string }>(
       "SELECT user_id FROM play_purchase_receipts WHERE token_digest = $1 FOR UPDATE",
       [tokenDigest],
     );
     if (seen.rows[0]) {
       if (seen.rows[0].user_id !== user.user_id) {
-        return { status: 409, body: { error: "purchase_already_claimed" } } satisfies ApiResult;
+        return { ok: false, status: 409, body: { error: "purchase_already_claimed" } };
       }
       const fresh = await getCommerceUser(client, user.user_id);
       return {
-        status: 200,
-        body: { ok: true, duplicate: true, productId, balances: normalizeBalances(fresh?.currency_balances) },
-      } satisfies ApiResult;
+        ok: true,
+        duplicate: true,
+        productId,
+        balances: normalizeBalances(fresh?.currency_balances),
+      };
     }
 
     const locked = await getCommerceUser(client, user.user_id, true);
-    if (!locked) return { status: 404, body: { error: "user_not_found" } } satisfies ApiResult;
+    if (!locked) return { ok: false, status: 404, body: { error: "user_not_found" } };
     const balances = normalizeBalances(locked.currency_balances);
     const next = { ...balances, [product.currency]: balances[product.currency] + grantedAmount };
     await client.query("UPDATE users SET currency_balances = $2 WHERE user_id = $1", [user.user_id, JSON.stringify(next)]);
@@ -196,25 +218,31 @@ async function verifyAndGrant(request: http.IncomingMessage, user: CommerceUser)
     );
 
     return {
-      status: 200,
-      body: {
-        ok: true,
-        duplicate: false,
-        productId,
-        currency: product.currency,
-        grantedAmount,
-        balances: next,
-        consumePurchase: true,
-      },
-    } satisfies ApiResult;
+      ok: true,
+      duplicate: false,
+      productId,
+      currency: product.currency,
+      grantedAmount,
+      balances: next,
+    };
   });
 
-  return grant;
+  if (!grant.ok) return { status: grant.status, body: grant.body };
+
+  // Entitlement is committed before Play consumption. If Play is temporarily
+  // unreachable, the receipt remains idempotent and a later retry will only
+  // re-attempt finalization; it can never double-credit currency.
+  const finalized = await consumeWithGooglePlay(productId, purchaseToken);
+  return {
+    status: 200,
+    body: { ...grant, playFinalized: finalized },
+  };
 }
 
 async function verifyWithGooglePlay(
   productId: string,
   purchaseToken: string,
+  expectedAccountBinding: string,
 ): Promise<{ ok: true; purchase: GoogleProductPurchase } | { ok: false; result: ApiResult }> {
   const credentials = serviceAccount();
   if (!credentials) {
@@ -224,7 +252,7 @@ async function verifyWithGooglePlay(
     };
   }
   const accessToken = await googleAccessToken(credentials);
-  const endpoint = `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${encodeURIComponent(PACKAGE_NAME)}/purchases/products/${encodeURIComponent(productId)}/tokens/${encodeURIComponent(purchaseToken)}`;
+  const endpoint = playPurchaseEndpoint(productId, purchaseToken);
   const response = await fetch(endpoint, { headers: { Authorization: `Bearer ${accessToken}` } });
   const text = await response.text();
   let purchase: GoogleProductPurchase = {};
@@ -242,7 +270,43 @@ async function verifyWithGooglePlay(
   if (purchase.productId && purchase.productId !== productId) {
     return { ok: false, result: { status: 409, body: { error: "product_mismatch" } } };
   }
+  if (purchase.obfuscatedExternalAccountId !== expectedAccountBinding) {
+    return {
+      ok: false,
+      result: {
+        status: 409,
+        body: { error: "account_mismatch", message: "That Google Play purchase is not attributed to this Quiz Royale account." },
+      },
+    };
+  }
   return { ok: true, purchase };
+}
+
+async function consumeWithGooglePlay(productId: string, purchaseToken: string): Promise<boolean> {
+  const credentials = serviceAccount();
+  if (!credentials) return false;
+  try {
+    const accessToken = await googleAccessToken(credentials);
+    const response = await fetch(`${playPurchaseEndpoint(productId, purchaseToken)}:consume`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    });
+    if (response.ok) return true;
+    const text = await response.text();
+    console.warn("Google Play consume failed", response.status, text.slice(0, 300));
+    return false;
+  } catch (error) {
+    console.warn("Google Play consume unavailable", (error as Error)?.message);
+    return false;
+  }
+}
+
+function playPurchaseEndpoint(productId: string, purchaseToken: string): string {
+  return `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${encodeURIComponent(PACKAGE_NAME)}/purchases/products/${encodeURIComponent(productId)}/tokens/${encodeURIComponent(purchaseToken)}`;
 }
 
 async function authenticate(request: http.IncomingMessage): Promise<CommerceUser | null> {
@@ -279,6 +343,11 @@ function normalizeBalances(raw: unknown): Balances {
 
 function safeBalance(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+function accountBinding(userId: string): string {
+  // 64-char, non-PII stable identifier accepted by BillingFlowParams.
+  return sha256(`quizroyale:${userId}`);
 }
 
 function serviceAccount(): ServiceAccount | null {
