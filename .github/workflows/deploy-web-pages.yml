@@ -1,0 +1,22 @@
+name: Deploy Web Multiplayer Production
+
+on:
+  push:
+    branches:
+      - Railway-API-Implementation
+    paths:
+      - "functions/**"
+      - "webapp/**"
+      - ".github/scripts/live-web-multiplayer-smoke.mjs"
+      - ".github/workflows/deploy-web-pages.yml"
+      - ".github/workflows/release-web-production.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  release:
+    uses: ./.github/workflows/release-web-production.yml
+    secrets: inherit

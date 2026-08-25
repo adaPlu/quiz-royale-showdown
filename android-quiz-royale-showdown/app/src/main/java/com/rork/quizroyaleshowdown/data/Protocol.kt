@@ -89,6 +89,7 @@ data class YouState(
 @Serializable
 data class MatchmakeResponse(
     val roomId: String,
+    val roomTicket: String,
     val mode: GameMode,
     val playersWaiting: Int = 1,
     val lobbyEndsAt: Long = 0L

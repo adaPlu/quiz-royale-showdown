@@ -20,6 +20,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import java.io.IOException
+import java.util.UUID
 
 private const val TAG = "AuthApi"
 
@@ -38,7 +39,7 @@ class AuthApi {
         install(ContentNegotiation) { json(json) }
     }
 
-    private val base: String get() = Backend.baseUrl
+    private val base: String get() = Backend.restBaseUrl
 
     // ------------------------------------------------------------ registration
 
@@ -47,6 +48,7 @@ class AuthApi {
         email: String,
         password: String,
         guestId: String?,
+        guestSecret: String?,
         transferStats: Boolean
     ): AuthOutcome<AuthResult> = runAuthCall {
         http.post("$base/auth/register") {
@@ -56,8 +58,9 @@ class AuthApi {
                     put("username", JsonPrimitive(username))
                     put("email", JsonPrimitive(email))
                     put("password", JsonPrimitive(password))
-                    if (guestId != null && transferStats) {
+                    if (guestId != null && guestSecret != null && transferStats) {
                         put("guestId", JsonPrimitive(guestId))
+                        put("guestSecret", JsonPrimitive(guestSecret))
                         put("transferStats", JsonPrimitive(true))
                     }
                 }
@@ -76,6 +79,27 @@ class AuthApi {
             )
         }
     }
+
+    suspend fun requestPasswordReset(identifier: String): AuthOutcome<PasswordResetRequestResult> =
+        runOutcomeCall {
+            http.post("$base/auth/forgot-password") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject { put("identifier", JsonPrimitive(identifier)) })
+            }
+        }
+
+    suspend fun resetPassword(token: String, password: String): AuthOutcome<AuthResult> =
+        runAuthCall {
+            http.post("$base/auth/reset-password") {
+                contentType(ContentType.Application.Json)
+                setBody(
+                    buildJsonObject {
+                        put("token", JsonPrimitive(token))
+                        put("password", JsonPrimitive(password))
+                    }
+                )
+            }
+        }
 
     suspend fun logout(token: String) {
         runCatching {
@@ -98,13 +122,14 @@ class AuthApi {
      * Issues a guest id, or renews [existingId] when it is still alive so a
      * returning player keeps their run.
      */
-    suspend fun guestSession(existingId: String?, displayName: String): GuestSession? = runCatching {
+    suspend fun guestSession(existingId: String?, existingSecret: String?, displayName: String?): GuestSession? = runCatching {
         val response = http.post("$base/guest/session") {
             contentType(ContentType.Application.Json)
             setBody(
                 buildJsonObject {
                     if (existingId != null) put("guestId", JsonPrimitive(existingId))
-                    put("displayName", JsonPrimitive(displayName))
+                    if (existingSecret != null) put("guestSecret", JsonPrimitive(existingSecret))
+                    if (!displayName.isNullOrBlank()) put("displayName", JsonPrimitive(displayName))
                 }
             )
         }
@@ -116,27 +141,40 @@ class AuthApi {
     }
 
     /** Slides the guest's expiry forward. Null means the id already lapsed. */
-    suspend fun guestHeartbeat(guestId: String): GuestSession? = runCatching {
+    suspend fun guestHeartbeat(guestId: String, guestSecret: String): GuestSession? = runCatching {
         val response = http.post("$base/guest/heartbeat") {
             contentType(ContentType.Application.Json)
-            setBody(buildJsonObject { put("guestId", JsonPrimitive(guestId)) })
+            setBody(
+                buildJsonObject {
+                    put("guestId", JsonPrimitive(guestId))
+                    put("guestSecret", JsonPrimitive(guestSecret))
+                }
+            )
         }
         if (!response.status.isSuccess()) return null
         response.body<GuestSessionEnvelope>().guest
     }.getOrElse { null }
 
-    suspend fun guestMe(guestId: String): GuestSession? = runCatching {
-        val response = http.get("$base/guest/me") { parameter("guestId", guestId) }
+    suspend fun guestMe(guestId: String, guestSecret: String): GuestSession? = runCatching {
+        val response = http.get("$base/guest/me") {
+            header("X-Guest-Id", guestId)
+            header("X-Guest-Secret", guestSecret)
+        }
         if (!response.status.isSuccess()) return null
         response.body<GuestSessionEnvelope>().guest
     }.getOrElse { null }
 
     /** Retires a guest id immediately rather than waiting for the TTL sweep. */
-    suspend fun endGuest(guestId: String) {
+    suspend fun endGuest(guestId: String, guestSecret: String) {
         runCatching {
             http.post("$base/guest/end") {
                 contentType(ContentType.Application.Json)
-                setBody(buildJsonObject { put("guestId", JsonPrimitive(guestId)) })
+                setBody(
+                    buildJsonObject {
+                        put("guestId", JsonPrimitive(guestId))
+                        put("guestSecret", JsonPrimitive(guestSecret))
+                    }
+                )
             }
         }.onFailure { Log.w(TAG, "Guest end failed: ${it.message}") }
     }
@@ -174,10 +212,42 @@ class AuthApi {
         null
     }
 
+    suspend fun friendInvites(token: String): FriendInvitesEnvelope? = runCatching {
+        val response = http.get("$base/friends/invites") { header("Authorization", "Bearer $token") }
+        if (!response.status.isSuccess()) return null
+        response.body<FriendInvitesEnvelope>()
+    }.getOrElse {
+        Log.w(TAG, "Friend invites fetch failed: ${it.message}")
+        null
+    }
+
+    suspend fun sendFriendInvite(token: String, username: String): AuthOutcome<FriendInvitesEnvelope> =
+        runOutcomeCall {
+            http.post("$base/friends/invites") {
+                header("Authorization", "Bearer $token")
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject { put("username", JsonPrimitive(username)) })
+            }
+        }
+
+    suspend fun respondFriendInvite(token: String, inviteId: String, action: String): AuthOutcome<FriendInvitesEnvelope> =
+        runOutcomeCall {
+            http.post("$base/friends/invites/respond") {
+                header("Authorization", "Bearer $token")
+                contentType(ContentType.Application.Json)
+                setBody(
+                    buildJsonObject {
+                        put("inviteId", JsonPrimitive(inviteId))
+                        put("action", JsonPrimitive(action))
+                    }
+                )
+            }
+        }
+
     /**
-     * Reports that the player is still active, optionally in a match, and gets
-     * the friends list back in the same round trip. Returns null on failure so
-     * the caller can keep the last known presence rather than blanking it.
+     * Reports that the player is still active and gets the friends list back in
+     * the same round trip. Returns null on failure so the caller can keep the
+     * last known presence rather than blanking it.
      */
     suspend fun presencePing(token: String, matchMode: String?): List<Friend>? = runCatching {
         val response = http.post("$base/presence/ping") {
@@ -185,8 +255,7 @@ class AuthApi {
             contentType(ContentType.Application.Json)
             setBody(
                 buildJsonObject {
-                    put("status", JsonPrimitive(if (matchMode != null) "IN_MATCH" else "IDLE"))
-                    if (matchMode != null) put("matchMode", JsonPrimitive(matchMode))
+                    put("status", JsonPrimitive("IDLE"))
                 }
             )
         }
@@ -197,11 +266,64 @@ class AuthApi {
         null
     }
 
-    suspend fun searchUsers(query: String): List<UserSearchResult> = runCatching {
-        val response = http.get("$base/users/search") { parameter("q", query) }
+    suspend fun searchUsers(token: String, query: String): List<UserSearchResult> = runCatching {
+        val response = http.get("$base/users/search") {
+            header("Authorization", "Bearer $token")
+            parameter("q", query)
+        }
         if (!response.status.isSuccess()) return emptyList()
         response.body<UserSearchResponse>().results
     }.getOrElse { emptyList() }
+
+    suspend fun currentSeason(token: String): CurrentSeasonEnvelope? = runCatching {
+        val response = http.get("$base/seasons/current") { header("Authorization", "Bearer $token") }
+        if (!response.status.isSuccess()) return null
+        response.body<CurrentSeasonEnvelope>()
+    }.getOrElse {
+        Log.w(TAG, "Current season fetch failed: ${it.message}")
+        null
+    }
+
+    suspend fun storeItems(token: String): StoreItemsEnvelope? = runCatching {
+        val response = http.get("$base/store/items") { header("Authorization", "Bearer $token") }
+        if (!response.status.isSuccess()) return null
+        response.body<StoreItemsEnvelope>()
+    }.getOrElse {
+        Log.w(TAG, "Store fetch failed: ${it.message}")
+        null
+    }
+
+    suspend fun purchaseStoreItem(token: String, itemId: String): AuthOutcome<StorePurchaseResult> =
+        runOutcomeCall {
+            http.post("$base/store/purchase") {
+                header("Authorization", "Bearer $token")
+                contentType(ContentType.Application.Json)
+                setBody(
+                    buildJsonObject {
+                        put("itemId", JsonPrimitive(itemId))
+                        put("idempotencyKey", JsonPrimitive(UUID.randomUUID().toString()))
+                    }
+                )
+            }
+        }
+
+    suspend fun cosmetics(token: String): List<CosmeticItem>? = runCatching {
+        val response = http.get("$base/cosmetics") { header("Authorization", "Bearer $token") }
+        if (!response.status.isSuccess()) return null
+        response.body<CosmeticsEnvelope>().cosmetics
+    }.getOrElse {
+        Log.w(TAG, "Cosmetics fetch failed: ${it.message}")
+        null
+    }
+
+    suspend fun equipCosmetic(token: String, cosmeticId: String): AuthOutcome<CosmeticsEnvelope> =
+        runOutcomeCall {
+            http.post("$base/cosmetics/equip") {
+                header("Authorization", "Bearer $token")
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject { put("cosmeticId", JsonPrimitive(cosmeticId)) })
+            }
+        }
 
     // ------------------------------------------------------------- leaderboard
 
@@ -230,10 +352,15 @@ class AuthApi {
     // ------------------------------------------------------------------ shared
 
     private suspend fun runAuthCall(block: suspend () -> HttpResponse): AuthOutcome<AuthResult> =
+        runOutcomeCall(block)
+
+    private suspend inline fun <reified T> runOutcomeCall(
+        noinline block: suspend () -> HttpResponse
+    ): AuthOutcome<T> =
         try {
             val response = block()
             if (response.status.isSuccess()) {
-                AuthOutcome.Ok(response.body<AuthResult>())
+                AuthOutcome.Ok(response.body<T>())
             } else {
                 decodeError(response)
             }

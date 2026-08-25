@@ -2,6 +2,7 @@ package com.rork.quizroyaleshowdown.data
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
 
 /**
  * Client mirror of the server's identity contract. Guest and registered
@@ -28,10 +29,27 @@ data class PlayerStats(
     val bestRank: Int? = null
 )
 
+@Serializable
+data class UserEntitlements(
+    val isReviewer: Boolean = false,
+    val unlimitedCurrency: Boolean = false,
+    val allStoreItemsUnlocked: Boolean = false,
+    val premiumAccess: Boolean = false,
+    val seasonPassAccess: Boolean = false
+)
+
+@Serializable
+data class VirtualCurrencyBalances(
+    val coins: Int = 0,
+    val gems: Int = 0,
+    val seasonalTickets: Int = 0
+)
+
 /** A temporary identity. Note the absence of email/password/friends. */
 @Serializable
 data class GuestSession(
     val guestId: String,
+    val guestSecret: String? = null,
     val displayName: String,
     /** Epoch ms at which this id lapses unless the player stays active. */
     val expiresAt: Long,
@@ -65,12 +83,99 @@ data class Friend(
 @Serializable
 data class FriendsEnvelope(val friends: List<Friend> = emptyList())
 
+@Serializable
+data class FriendInvite(
+    val inviteId: String,
+    val direction: String,
+    val status: String,
+    val userId: String,
+    val username: String,
+    val createdAt: Long = 0L,
+    val respondedAt: Long? = null
+)
+
+@Serializable
+data class FriendInvitesEnvelope(
+    val incoming: List<FriendInvite> = emptyList(),
+    val outgoing: List<FriendInvite> = emptyList()
+)
+
+@Serializable
+data class Season(
+    val seasonId: String,
+    val name: String,
+    val startsAt: Long,
+    val endsAt: Long,
+    val rewardTrack: List<JsonObject> = emptyList()
+)
+
+@Serializable
+data class SeasonProgress(
+    val seasonId: String,
+    val xp: Int = 0,
+    val level: Int = 1,
+    val ticketsEarned: Int = 0,
+    val updatedAt: Long = 0L
+)
+
+@Serializable
+data class CurrentSeasonEnvelope(
+    val season: Season,
+    val progress: SeasonProgress
+)
+
+@Serializable
+data class StoreItem(
+    val itemId: String,
+    val itemType: String,
+    val displayName: String,
+    val description: String,
+    val currency: String,
+    val price: Int,
+    val payload: JsonObject = JsonObject(emptyMap()),
+    val owned: Boolean = false
+)
+
+@Serializable
+data class StoreItemsEnvelope(
+    val balances: VirtualCurrencyBalances = VirtualCurrencyBalances(),
+    val items: List<StoreItem> = emptyList()
+)
+
+@Serializable
+data class CosmeticItem(
+    val cosmeticId: String,
+    val cosmeticType: String,
+    val displayName: String,
+    val rarity: String,
+    val payload: JsonObject = JsonObject(emptyMap()),
+    val owned: Boolean = false,
+    val equipped: Boolean = false
+)
+
+@Serializable
+data class CosmeticsEnvelope(val cosmetics: List<CosmeticItem> = emptyList())
+
+@Serializable
+data class StorePurchaseResult(
+    val ok: Boolean = false,
+    val duplicate: Boolean = false,
+    val purchaseId: String? = null,
+    val profile: UserProfile? = null,
+    val balances: VirtualCurrencyBalances = VirtualCurrencyBalances(),
+    val items: List<StoreItem> = emptyList(),
+    val cosmetics: List<CosmeticItem> = emptyList()
+)
+
 /** A durable identity: credentials, a friends graph and persistent stats. */
 @Serializable
 data class UserProfile(
     val userId: String,
     val username: String,
     val email: String,
+    val role: String = "player",
+    val entitlements: UserEntitlements = UserEntitlements(),
+    val currencyBalances: VirtualCurrencyBalances = VirtualCurrencyBalances(),
     val createdAt: Long = 0L,
     val stats: PlayerStats = PlayerStats(),
     val friends: List<Friend> = emptyList()
@@ -89,6 +194,9 @@ data class AuthResult(
     val profile: UserProfile,
     val transferredFromGuest: Boolean = false
 )
+
+@Serializable
+data class PasswordResetRequestResult(val ok: Boolean = false)
 
 @Serializable
 data class FriendMutationResult(val ok: Boolean = false, val profile: UserProfile? = null)

@@ -8,8 +8,15 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { buildQuestionSet, type Question } from "./questions";
-import { callDo, GUEST_REGISTRY_ID, LEADERBOARD_ID, USER_DIRECTORY_ID } from "./do-dispatch";
+import { callDo, GUEST_REGISTRY_ID, USER_DIRECTORY_ID, type DoClassName, type DoEnv } from "./do-dispatch";
 import type { MatchOutcome, SubjectKind } from "./identity";
+import {
+  callRailway,
+  reportOutcomeToRailway,
+  reportQuestionUsageToRailway,
+  selectQuestionsFromRailway,
+  type QuestionUsageItem,
+} from "./railway-api";
 import {
   ALL_POWER_UPS,
   MODE_CONFIG,
@@ -23,12 +30,10 @@ import {
   type YouState,
 } from "./protocol";
 
-type Env = {
-  DO: Fetcher & {
-    setAlarm(className: string, id: string, scheduledTime: number | Date): Promise<void>;
-    getAlarm(className: string, id: string): Promise<number | null>;
-    deleteAlarm(className: string, id: string): Promise<void>;
-  };
+type Env = DoEnv & {
+  RAILWAY_API_URL?: string;
+  RAILWAY_INTERNAL_TOKEN?: string;
+  ALLOW_STATIC_QUESTIONS_FALLBACK?: string;
 };
 
 type PlayerState = {
@@ -59,6 +64,7 @@ type PlayerState = {
   lastAnswerCorrect: boolean | null;
   removedOptions: number[];
   spentPowerUps: PowerUp[];
+  powerUpCharges: number;
   shieldActive: boolean;
   doubleActive: boolean;
 };
@@ -73,12 +79,19 @@ type MatchState = {
    * early round end, so speed bonuses stay accurate. */
   questionStartedAt: number;
   questions: Question[];
+  questionsFromRailway?: boolean;
   players: Record<string, PlayerState>;
   order: string[];
   winnerId: string | null;
   botsSpawned: boolean;
   /** Guards against double-crediting stats if the match settles twice. */
   reported?: boolean;
+  /** Durable retry batch for stat reports that have not been acknowledged yet. */
+  pendingReports?: MatchOutcome[];
+  reportAttempts?: number;
+  reportedQuestionRounds?: number[];
+  pendingUsageReports?: QuestionUsageItem[];
+  usageReportAttempts?: number;
 };
 
 const BOT_NAMES = [
@@ -114,8 +127,9 @@ export class MatchRoom extends DurableObject<Env> {
     // Trusted: the Worker overwrites this after resolving the caller's identity,
     // so a client cannot claim to be a registered user.
     const subjectKind = parseSubjectKind(url.searchParams.get("kind"));
+    const powerUpCharges = clampInt(Number.parseInt(url.searchParams.get("powerUpCharges") ?? "", 10), 0, 99);
 
-    const state = this.ensureState(mode);
+    const state = await this.ensureState(mode);
 
     // Late joiners become spectators rather than being rejected outright —
     // they still see the match play out and can rematch from the results screen.
@@ -124,9 +138,11 @@ export class MatchRoom extends DurableObject<Env> {
       existing.connected = true;
       existing.name = name || existing.name;
       existing.subjectKind = subjectKind;
+      existing.powerUpCharges = powerUpCharges;
     } else if (state.phase === "LOBBY" && humanCount(state) < MODE_CONFIG[state.mode].maxPlayers) {
       const player = newPlayer(playerId, name, false, MODE_CONFIG[state.mode].lives);
       player.subjectKind = subjectKind;
+      player.powerUpCharges = powerUpCharges;
       state.players[playerId] = player;
       state.order.push(playerId);
     }
@@ -220,6 +236,15 @@ export class MatchRoom extends DurableObject<Env> {
     matchMode: GameMode | null,
   ): Promise<void> {
     try {
+      const railway = await callRailway(this.env, "/internal/presence", {
+        method: "POST",
+        body: { userId, status, matchMode },
+      });
+      if (railway?.ok) return;
+      if (railway && this.env.RAILWAY_API_URL) {
+        throw new Error(`Railway API returned ${railway.status}`);
+      }
+
       await callDo(this.env, "UserDirectory", USER_DIRECTORY_ID, "/internal/presence", {
         method: "POST",
         body: { userId, status, matchMode },
@@ -231,14 +256,22 @@ export class MatchRoom extends DurableObject<Env> {
 
   /** Durable backstop: fires even if the room hibernated with no traffic. */
   async onAlarm(): Promise<void> {
+    const state = this.state;
+    if (state?.pendingReports?.length) {
+      await this.flushPendingReports();
+    }
+    if (state?.pendingUsageReports?.length) {
+      await this.flushPendingUsageReports();
+    }
     this.tick();
   }
 
   // ---------------------------------------------------------------- state
 
-  private ensureState(mode: GameMode): MatchState {
+  private async ensureState(mode: GameMode): Promise<MatchState> {
     if (this.state) return this.state;
     const cfg = MODE_CONFIG[mode];
+    const selectedQuestions = await this.loadQuestions(mode, cfg.totalRounds);
     this.state = {
       matchId: this.ctx.id.name ?? crypto.randomUUID(),
       mode,
@@ -246,13 +279,25 @@ export class MatchRoom extends DurableObject<Env> {
       roundNumber: 0,
       phaseEndsAt: Date.now() + cfg.lobbyMs,
       questionStartedAt: 0,
-      questions: buildQuestionSet(cfg.totalRounds),
+      questions: selectedQuestions.questions,
+      questionsFromRailway: selectedQuestions.fromRailway,
       players: {},
       order: [],
       winnerId: null,
       botsSpawned: false,
     };
     return this.state;
+  }
+
+  private async loadQuestions(mode: GameMode, count: number): Promise<{ questions: Question[]; fromRailway: boolean }> {
+    if (this.env.RAILWAY_API_URL) {
+      const railway = await selectQuestionsFromRailway(this.env, mode, count).catch(() => null);
+      if (railway?.length === count) return { questions: railway, fromRailway: true };
+      if (this.env.ALLOW_STATIC_QUESTIONS_FALLBACK !== "true") {
+        throw new Error("Railway question selection failed and static fallback is disabled.");
+      }
+    }
+    return { questions: buildQuestionSet(count), fromRailway: false };
   }
 
   private persist(): void {
@@ -266,7 +311,16 @@ export class MatchRoom extends DurableObject<Env> {
 
   private armPhaseTimer(): void {
     const state = this.state;
-    if (!state || state.phase === "FINISHED") return;
+    if (!state) return;
+    if (state.phase === "FINISHED") {
+      if (state.pendingReports?.length) {
+        this.ctx.waitUntil(this.flushPendingReports());
+      }
+      if (state.pendingUsageReports?.length) {
+        this.ctx.waitUntil(this.flushPendingUsageReports());
+      }
+      return;
+    }
 
     if (this.phaseTimer !== null) clearTimeout(this.phaseTimer);
     const delay = Math.max(50, state.phaseEndsAt - Date.now());
@@ -276,11 +330,7 @@ export class MatchRoom extends DurableObject<Env> {
     }, delay);
 
     // Backstop in case the room is evicted before the timeout fires.
-    this.ctx.waitUntil(
-      this.env.DO
-        .setAlarm("MatchRoom", this.ctx.id.name ?? "", state.phaseEndsAt + 2_000)
-        .catch(() => undefined),
-    );
+    this.ctx.waitUntil(this.setRoomAlarm(state.phaseEndsAt + 2_000));
   }
 
   private tick(): void {
@@ -344,6 +394,30 @@ export class MatchRoom extends DurableObject<Env> {
     }
 
     this.scheduleBotAnswers();
+    this.queueQuestionUsage(state);
+  }
+
+  private queueQuestionUsage(state: MatchState): void {
+    if (!this.env.RAILWAY_API_URL) return;
+    if (!state.questionsFromRailway) return;
+    const question = state.questions[state.roundNumber - 1];
+    if (!question) return;
+    const reported = new Set(state.reportedQuestionRounds ?? []);
+    if (reported.has(state.roundNumber)) return;
+    reported.add(state.roundNumber);
+    state.reportedQuestionRounds = [...reported].sort((a, b) => a - b);
+    state.pendingUsageReports = [
+      ...(state.pendingUsageReports ?? []),
+      {
+        roundNumber: state.roundNumber,
+        questionId: question.id,
+        category: question.category,
+        difficulty: question.difficulty,
+        askedAt: state.questionStartedAt,
+      },
+    ];
+    state.usageReportAttempts = 0;
+    this.ctx.waitUntil(this.flushPendingUsageReports());
   }
 
   private revealRound(): void {
@@ -469,11 +543,11 @@ export class MatchRoom extends DurableObject<Env> {
     state.phase = "FINISHED";
     state.phaseEndsAt = Date.now();
 
-    if (!state.reported) {
-      state.reported = true;
+    if (!state.reported && !state.pendingReports?.length) {
       const outcomes = this.buildOutcomes(state);
-      // Fire-and-forget: the results screen must not wait on stat persistence.
-      this.ctx.waitUntil(this.reportOutcomes(outcomes));
+      state.pendingReports = outcomes;
+      state.reportAttempts = 0;
+      this.ctx.waitUntil(this.flushPendingReports());
 
       // The match is over even if players linger on the results screen, so drop
       // the IN_MATCH claim now rather than when the socket eventually closes.
@@ -492,6 +566,7 @@ export class MatchRoom extends DurableObject<Env> {
       const p = state.players[id];
       if (!p || p.isBot || !p.subjectKind) continue;
       outcomes.push({
+        matchId: state.matchId,
         subjectKind: p.subjectKind,
         subjectId: p.id,
         displayName: p.name,
@@ -511,21 +586,72 @@ export class MatchRoom extends DurableObject<Env> {
   private async reportOutcomes(outcomes: MatchOutcome[]): Promise<void> {
     await Promise.all(
       outcomes.map(async (outcome) => {
-        const [className, instanceId] =
+        const [className, instanceId]: [DoClassName, string] =
           outcome.subjectKind === "USER"
             ? ["UserDirectory", USER_DIRECTORY_ID]
             : ["GuestRegistry", GUEST_REGISTRY_ID];
         try {
-          await callDo(this.env, className, instanceId, "/internal/report", {
+          if (this.env.RAILWAY_API_URL) {
+            const response = await reportOutcomeToRailway(this.env, outcome);
+            if (!response?.ok) throw new Error(`Railway API returned ${response?.status ?? "no response"}`);
+            return;
+          }
+          const response = await callDo(this.env, className, instanceId, "/internal/report", {
             method: "POST",
             body: { outcome },
           });
+          if (!response.ok) throw new Error(`Durable Object returned ${response.status}`);
         } catch (error) {
-          // A stat write failing must never break the match result itself.
           console.error("stat report failed", outcome.subjectKind, (error as Error)?.message);
+          throw error;
         }
       }),
     );
+  }
+
+  private async flushPendingReports(): Promise<void> {
+    const state = this.state;
+    const reports = state?.pendingReports;
+    if (!state || !reports?.length) return;
+
+    try {
+      await this.reportOutcomes(reports);
+      state.pendingReports = [];
+      state.reported = true;
+      this.persist();
+    } catch {
+      state.reportAttempts = (state.reportAttempts ?? 0) + 1;
+      this.persist();
+      const retryDelay = Math.min(60_000, 2_000 * 2 ** Math.min(state.reportAttempts, 5));
+      this.ctx.waitUntil(this.setRoomAlarm(Date.now() + retryDelay));
+    }
+  }
+
+  private async flushPendingUsageReports(): Promise<void> {
+    const state = this.state;
+    const reports = state?.pendingUsageReports;
+    if (!state || !reports?.length || !this.env.RAILWAY_API_URL) return;
+
+    try {
+      const response = await reportQuestionUsageToRailway(this.env, state.matchId, state.mode, reports);
+      if (!response?.ok) throw new Error(`Railway API returned ${response?.status ?? "no response"}`);
+      state.pendingUsageReports = [];
+      this.persist();
+    } catch {
+      state.usageReportAttempts = (state.usageReportAttempts ?? 0) + 1;
+      this.persist();
+      const retryDelay = Math.min(60_000, 2_000 * 2 ** Math.min(state.usageReportAttempts, 5));
+      this.ctx.waitUntil(this.setRoomAlarm(Date.now() + retryDelay));
+    }
+  }
+
+  private async setRoomAlarm(scheduledTime: number | Date): Promise<void> {
+    try {
+      await this.ctx.storage.setAlarm(scheduledTime);
+      return;
+    } catch {
+      await this.env.DO?.setAlarm?.("MatchRoom", this.ctx.id.name ?? "", scheduledTime).catch(() => undefined);
+    }
   }
 
   /** Base + speed bonus + streak bonus, adjusted by the round's power-ups. */
@@ -594,6 +720,10 @@ export class MatchRoom extends DurableObject<Env> {
     if (!ALL_POWER_UPS.includes(powerUp)) return;
     if (player.spentPowerUps.includes(powerUp)) {
       this.sendError(ws, "POWERUP_SPENT", "You already used that power-up.");
+      return;
+    }
+    if (player.spentPowerUps.length >= player.powerUpCharges) {
+      this.sendError(ws, "POWERUP_EMPTY", "You do not have a power-up charge available.");
       return;
     }
     if (player.answerIndex !== null) {
@@ -829,7 +959,9 @@ export class MatchRoom extends DurableObject<Env> {
       placement: p.placement,
       answerIndex: p.answerIndex,
       removedOptions: p.removedOptions,
-      availablePowerUps: ALL_POWER_UPS.filter((pu) => !p.spentPowerUps.includes(pu)),
+      availablePowerUps: p.spentPowerUps.length < p.powerUpCharges
+        ? ALL_POWER_UPS.filter((pu) => !p.spentPowerUps.includes(pu))
+        : [],
       shieldActive: p.shieldActive,
       doubleActive: p.doubleActive,
     };
@@ -868,9 +1000,15 @@ function newPlayer(id: string, name: string, isBot: boolean, lives: number): Pla
     lastAnswerCorrect: null,
     removedOptions: [],
     spentPowerUps: [],
+    powerUpCharges: 0,
     shieldActive: false,
     doubleActive: false,
   };
+}
+
+function clampInt(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
 }
 
 function pickBotAnswer(question: Question, skill: number): number {

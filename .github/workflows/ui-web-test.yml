@@ -1,0 +1,98 @@
+name: UI and Web Test
+
+on:
+  push:
+    branches:
+      - UITest
+  pull_request:
+    branches:
+      - Railway-API-Implementation
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    name: Web build and browser smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: webapp/package-lock.json
+      - name: Install locked web dependencies
+        run: npm ci --prefix webapp
+      - name: Typecheck and build web app
+        run: npm run build --prefix webapp
+      - name: Install Playwright browsers
+        working-directory: webapp
+        run: npx playwright install --with-deps chromium firefox webkit
+      - name: Run cross-browser smoke tests
+        run: npm run test:e2e --prefix webapp
+
+  worker:
+    name: Worker tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Worker dependencies
+        run: npm ci --prefix functions
+      - name: Run Worker tests
+        run: npm test --prefix functions
+
+  railway:
+    name: Railway API build, migrations and tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: quizroyale_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d quizroyale_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/quizroyale_ci
+      PGSSL: disable
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Railway API dependencies
+        run: npm ci --prefix railway-api
+      - name: Typecheck and build Railway API
+        run: npm run build --prefix railway-api
+      - name: Apply all Railway migrations
+        run: npm run migrate --prefix railway-api
+      - name: Run Railway API tests
+        run: npm test --prefix railway-api
+
+  android:
+    name: Android unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android-quiz-royale-showdown
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Run Android unit tests
+        run: ./gradlew :app:testDebugUnitTest --stacktrace

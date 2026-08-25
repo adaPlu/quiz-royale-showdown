@@ -1,0 +1,40 @@
+name = "quiz-royale-functions"
+main = "index.ts"
+compatibility_date = "2026-08-22"
+
+[vars]
+ENVIRONMENT = "production"
+RAILWAY_API_URL = "https://railway-api-production-5772.up.railway.app"
+
+# Required secrets:
+#   wrangler secret put MATCH_ROOM_TICKET_SECRET
+#   wrangler secret put RAILWAY_INTERNAL_TOKEN
+#
+# Optional review account vars:
+#   GOOGLE_PLAY_REVIEW_EMAIL = "google-reviewer@quizroyale.gg"
+#   GOOGLE_PLAY_REVIEW_USERNAME = "google_reviewer"
+# GOOGLE_PLAY_REVIEW_PASSWORD must be configured as a secret, not a plain var.
+
+[[durable_objects.bindings]]
+name = "MATCH_ROOM"
+class_name = "MatchRoom"
+
+[[durable_objects.bindings]]
+name = "MATCHMAKER"
+class_name = "Matchmaker"
+
+[[durable_objects.bindings]]
+name = "USER_DIRECTORY"
+class_name = "UserDirectory"
+
+[[durable_objects.bindings]]
+name = "GUEST_REGISTRY"
+class_name = "GuestRegistry"
+
+[[durable_objects.bindings]]
+name = "LEADERBOARD"
+class_name = "Leaderboard"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["MatchRoom", "Matchmaker", "UserDirectory", "GuestRegistry", "Leaderboard"]

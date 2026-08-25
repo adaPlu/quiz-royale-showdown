@@ -54,12 +54,11 @@ import com.rork.quizroyaleshowdown.ui.components.ArenaBanner
 import com.rork.quizroyaleshowdown.ui.components.ArenaButton
 import com.rork.quizroyaleshowdown.ui.components.ArenaCheckRow
 import com.rork.quizroyaleshowdown.ui.components.ArenaTextField
-import com.rork.quizroyaleshowdown.ui.components.LegalLinks
 import com.rork.quizroyaleshowdown.ui.components.PressableSurface
 import com.rork.quizroyaleshowdown.ui.theme.Arena
 
-/** Which half of the identity flow is on screen. */
-enum class AuthMode { REGISTER, LOGIN }
+/** Which half of the identity flow is on screen, plus password recovery. */
+enum class AuthMode { REGISTER, LOGIN, FORGOT, RESET }
 
 /**
  * Account creation and sign-in. Validation runs locally for instant feedback and
@@ -81,6 +80,8 @@ fun AuthScreen(
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var identifier by remember { mutableStateOf("") }
+    var resetIdentifier by remember { mutableStateOf("") }
+    var resetToken by remember { mutableStateOf("") }
     var transferStats by remember { mutableStateOf(true) }
     var touched by remember { mutableStateOf(false) }
 
@@ -91,10 +92,12 @@ fun AuthScreen(
     val localUsernameError = if (touched) validateUsernameLocal(username) else null
     val localEmailError = if (touched) validateEmailLocal(email) else null
     val localPasswordError = if (touched) validatePasswordLocal(password, username) else null
+    val localResetPasswordError = if (touched) validatePasswordLocal(password, "") else null
 
     val usernameError = state.fieldErrors["username"] ?: localUsernameError
     val emailError = state.fieldErrors["email"] ?: localEmailError
     val passwordError = state.fieldErrors["password"] ?: localPasswordError
+    val resetPasswordError = state.fieldErrors["password"] ?: localResetPasswordError
 
     LaunchedEffect(mode) { viewModel.clearMessages() }
 
@@ -130,7 +133,12 @@ fun AuthScreen(
             Spacer(Modifier.height(22.dp))
 
             Text(
-                text = if (mode == AuthMode.REGISTER) "CLAIM YOUR\nCROWN" else "WELCOME\nBACK",
+                text = when (mode) {
+                    AuthMode.REGISTER -> "CLAIM YOUR\nCROWN"
+                    AuthMode.LOGIN -> "WELCOME\nBACK"
+                    AuthMode.FORGOT -> "RESET\nACCESS"
+                    AuthMode.RESET -> "NEW\nPASSWORD"
+                },
                 style = MaterialTheme.typography.displayLarge.copy(
                     brush = Brush.horizontalGradient(
                         if (mode == AuthMode.REGISTER) {
@@ -148,10 +156,15 @@ fun AuthScreen(
             Spacer(Modifier.height(8.dp))
 
             Text(
-                text = if (mode == AuthMode.REGISTER) {
-                    "A registered account keeps your stats forever, unlocks friends, and holds your leaderboard spot."
-                } else {
-                    "Sign in to pick your record back up exactly where you left it."
+                text = when (mode) {
+                    AuthMode.REGISTER ->
+                        "A registered account keeps your stats forever, unlocks friends, and holds your leaderboard spot."
+                    AuthMode.LOGIN ->
+                        "Sign in to pick your record back up exactly where you left it."
+                    AuthMode.FORGOT ->
+                        "Enter your username or email and we'll send a one-time reset code."
+                    AuthMode.RESET ->
+                        "Paste the reset code from your email and choose a new password."
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = Arena.TextMid
@@ -159,9 +172,10 @@ fun AuthScreen(
 
             Spacer(Modifier.height(20.dp))
 
-            ModeToggle(mode = mode, onSelect = { mode = it })
-
-            Spacer(Modifier.height(20.dp))
+            if (mode == AuthMode.REGISTER || mode == AuthMode.LOGIN) {
+                ModeToggle(mode = mode, onSelect = { mode = it })
+                Spacer(Modifier.height(20.dp))
+            }
 
             if (state.error != null) {
                 ArenaBanner(message = state.error.orEmpty(), isError = true)
@@ -227,7 +241,7 @@ fun AuthScreen(
                                     "and category progress into the new account."
                             )
                         }
-                    } else {
+                    } else if (current == AuthMode.LOGIN) {
                         ArenaTextField(
                             label = "Username or email",
                             value = identifier,
@@ -249,6 +263,45 @@ fun AuthScreen(
                             keyboardType = KeyboardType.Password,
                             imeAction = ImeAction.Done
                         )
+                    } else if (current == AuthMode.FORGOT) {
+                        ArenaTextField(
+                            label = "Username or email",
+                            value = resetIdentifier,
+                            onValueChange = { resetIdentifier = it },
+                            placeholder = "Where to send the reset email",
+                            error = state.fieldErrors["identifier"],
+                            enabled = !state.busy,
+                            maxLength = 254,
+                            imeAction = ImeAction.Done
+                        )
+                    } else {
+                        ArenaTextField(
+                            label = "Reset code",
+                            value = resetToken,
+                            onValueChange = { resetToken = it.trim() },
+                            placeholder = "Code from your email",
+                            error = state.fieldErrors["token"],
+                            enabled = !state.busy,
+                            maxLength = 128,
+                            imeAction = ImeAction.Next
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        ArenaTextField(
+                            label = "New password",
+                            value = password,
+                            onValueChange = { password = it },
+                            placeholder = "At least 8 characters",
+                            error = resetPasswordError,
+                            helper = if (resetPasswordError == null) {
+                                "Needs a letter and a number."
+                            } else {
+                                null
+                            },
+                            isPassword = true,
+                            enabled = !state.busy,
+                            keyboardType = KeyboardType.Password,
+                            imeAction = ImeAction.Done
+                        )
                     }
                 }
             }
@@ -256,7 +309,12 @@ fun AuthScreen(
             Spacer(Modifier.height(24.dp))
 
             ArenaButton(
-                text = if (mode == AuthMode.REGISTER) "Create account" else "Sign in",
+                text = when (mode) {
+                    AuthMode.REGISTER -> "Create account"
+                    AuthMode.LOGIN -> "Sign in"
+                    AuthMode.FORGOT -> "Send reset email"
+                    AuthMode.RESET -> "Reset password"
+                },
                 busy = state.busy,
                 colors = if (mode == AuthMode.REGISTER) {
                     listOf(Arena.GoldBright, Arena.GoldDeep)
@@ -280,10 +338,42 @@ fun AuthScreen(
                             )
                         }
                     } else {
-                        if (identifier.isNotBlank() && password.isNotBlank()) {
-                            viewModel.login(identifier, password, onDone)
+                        if (mode == AuthMode.LOGIN) {
+                            if (identifier.isNotBlank() && password.isNotBlank()) {
+                                viewModel.login(identifier, password, onDone)
+                            }
+                        } else if (mode == AuthMode.FORGOT) {
+                            if (resetIdentifier.isNotBlank()) {
+                                viewModel.requestPasswordReset(resetIdentifier)
+                                mode = AuthMode.RESET
+                                touched = false
+                            }
+                        } else {
+                            val valid = resetToken.isNotBlank() &&
+                                validatePasswordLocal(password, "") == null
+                            if (valid) {
+                                viewModel.resetPassword(resetToken, password, onDone)
+                            }
                         }
                     }
+                }
+            )
+
+            Spacer(Modifier.height(16.dp))
+
+            RecoveryLinks(
+                mode = mode,
+                onForgot = {
+                    mode = AuthMode.FORGOT
+                    touched = false
+                },
+                onReset = {
+                    mode = AuthMode.RESET
+                    touched = false
+                },
+                onLogin = {
+                    mode = AuthMode.LOGIN
+                    touched = false
                 }
             )
 
@@ -315,18 +405,6 @@ fun AuthScreen(
 
             Spacer(Modifier.height(18.dp))
 
-            // Consent belongs at the point of account creation, not buried in a
-            // settings screen, so the links sit directly under the submit button.
-            LegalLinks(
-                prefix = if (mode == AuthMode.REGISTER) {
-                    "By creating an account you agree to our"
-                } else {
-                    null
-                }
-            )
-
-            Spacer(Modifier.height(16.dp))
-
             Text(
                 text = "Not ready? You can keep playing as a guest.",
                 style = MaterialTheme.typography.bodySmall,
@@ -334,6 +412,52 @@ fun AuthScreen(
                 modifier = Modifier.fillMaxWidth(),
                 textAlign = TextAlign.Center
             )
+        }
+    }
+}
+
+@Composable
+private fun RecoveryLinks(
+    mode: AuthMode,
+    onForgot: () -> Unit,
+    onReset: () -> Unit,
+    onLogin: () -> Unit
+) {
+    val items = when (mode) {
+        AuthMode.REGISTER -> emptyList()
+        AuthMode.LOGIN -> listOf("Forgot password?" to onForgot)
+        AuthMode.FORGOT -> listOf("I have a reset code" to onReset, "Back to sign in" to onLogin)
+        AuthMode.RESET -> listOf("Send a new code" to onForgot, "Back to sign in" to onLogin)
+    }
+    if (items.isEmpty()) return
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        items.forEachIndexed { index, item ->
+            if (index > 0) {
+                Text(
+                    text = "  |  ",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Arena.TextLow
+                )
+            }
+            PressableSurface(
+                onClick = item.second,
+                background = androidx.compose.ui.graphics.Color.Transparent,
+                borderColor = androidx.compose.ui.graphics.Color.Transparent,
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text(
+                    text = item.first,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Arena.Cyan,
+                    fontWeight = FontWeight.W700,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
+                )
+            }
         }
     }
 }

@@ -1,146 +1,115 @@
 # Google Play store listing — Quiz Royale Showdown
 
-This is the source of truth for the Play Console listing. Paste each block into
-the matching Play Console field.
+This document is the working source for the Google Play listing for the current `Railway-API-Implementation` branch.
 
-> **Note on "App Store":** this project ships Android only (`rork.json` has no iOS
-> app), so the live listing is Google Play. The Apple Standard EULA link below is
-> included so the same copy can be reused verbatim if an iOS build is added later —
-> Apple's EULA has no effect on an Android-only release.
+> Architecture note: this branch uses the Android client + Cloudflare Worker/Durable Objects for real-time match routing, with the Railway API, PostgreSQL, and Redis for persistent services. Do not reuse older copy that says all account data is stored only on Cloudflare.
 
----
+## App name
 
-## App name (max 30 chars)
-
-```
+```text
 Quiz Royale Showdown
 ```
-`20/30`
 
-## Short description (max 80 chars)
+## Short description
 
-```
+```text
 Live trivia battle royale. Answer fast, survive rounds, outlast every rival.
 ```
-`74/80`
 
----
+## Full description
 
-## Full description (max 4000 chars)
-
-```
-Quiz Royale Showdown is a real-time trivia battle royale. You and your rivals face the same question at the same moment — answer fast and correctly to survive, hesitate and you're out. Rounds continue until one player is left standing.
-
-LAST ONE STANDING
-Every match is elimination. Lose your lives and you're knocked out, but you stay to watch the finish. Speed matters as much as accuracy: the faster you lock in a correct answer, the bigger your score, and answer streaks stack on top.
+```text
+Quiz Royale Showdown is a real-time multiplayer trivia battle royale. Players face the same questions under time pressure, score points for correct answers, survive elimination rounds, and compete to finish on top.
 
 THREE WAYS TO PLAY
-• Quick Match — jump straight into a fast lobby against live opponents
-• Tournament — longer brackets, more rounds, higher stakes
-• Practice — drill solo at your own pace. Points and category progress still count, your win/loss record stays untouched
+• Quick Match — jump into a live multiplayer lobby
+• Tournament — play longer, higher-stakes rounds
+• Practice — sharpen your trivia skills at your own pace
 
-POWER-UPS THAT SWING A ROUND
-Spend charges earned from play at the moment it counts most:
-• 50/50 — cut two wrong answers from the board
-• Shield — survive one wrong answer without losing a life
-• Double Down — double your points on a question you're sure of
+BUILD YOUR RECORD
+Track wins, losses, points, best placements, category progress, badges, XP, seasonal progress, power-up inventory, cosmetics, and leaderboard position.
 
-CLIMB THE WORLD BOARD
-Global and per-category leaderboards rank every player. Reach the top 100, top 10, top 3 or world number one and the milestone is yours permanently — badges are captured the moment you earn them and never disappear if someone later overtakes you.
+POWER-UPS AND REWARDS
+Earn and spend in-game virtual currency and power-up charges through gameplay. The current Android build does not use Google Play Billing or sell real-money purchases.
 
-EARN YOUR BADGE SHELF
-Nine tiers across five families: match wins, leaderboard milestones, career points, correct answers, and taking first place. Your profile tracks career stats, best finish, best score, power-up charges and per-category mastery.
-
-PLAY WITHOUT AN ACCOUNT
-No sign-up wall. Start playing instantly as a guest — your wins, points, power-ups and leaderboard spot all count. Guest sessions are temporary and reset after 30 minutes of inactivity, and the app shows you a countdown before that happens.
-
-Register when you're ready and choose to carry your guest run across to a permanent account: stats that persist forever, a friends list, and a durable identity.
+PLAY AS A GUEST OR REGISTER
+Start without an account, or register to keep a persistent identity and progression. Registered accounts support sign-in, password recovery, friends, persistent stats, store inventory, cosmetics, and progression.
 
 PLAY WITH FRIENDS
-Add friends by username and see who's around at a glance — online, in a match, or last seen. Compare points and crowns side by side.
+Find players by username, send and respond to friend invitations, and see friend presence information.
 
-BUILT FAIR
-Every score, elimination and ranking is calculated on our servers, never on your device. Answers stay hidden until the reveal, so no one can read ahead. Passwords are salted and hashed and never stored in readable form.
+SERVER-AUTHORITATIVE MULTIPLAYER
+Matchmaking and live game rooms are coordinated through Cloudflare Workers and Durable Objects. Persistent application data is handled through the Railway API backed by PostgreSQL and Redis.
 
-NO ADS. NO TRACKING.
-Quiz Royale Showdown contains no advertising, no analytics SDKs and no third-party trackers. It requests no access to your location, contacts, photos, camera or microphone.
+NO ADS
+The current build contains no advertising system.
 
 Requires an internet connection.
 
-—
-
-Privacy Policy: https://quiz-royale-showdown-backend.rork.app/legal/privacy
-Terms and Conditions: https://quiz-royale-showdown-backend.rork.app/legal/terms
-End User License Agreement (Apple Standard EULA): https://www.apple.com/legal/internet-services/itunes/dev/stdeula/
+Privacy Policy: https://quizroyale.gg/privacy-policy/
 Support: quizroyaleshowdown@gmail.com
 ```
-
----
 
 ## Play Console field values
 
 | Field | Value |
 | --- | --- |
-| Privacy policy URL | `https://quiz-royale-showdown-backend.rork.app/legal/privacy` |
+| Privacy policy URL | `https://quizroyale.gg/privacy-policy/` |
 | Category | Games → Trivia |
-| Contains ads | **No** |
-| In-app purchases | **No** |
-| Target age | 13+ |
+| Contains ads | No |
+| Google Play Billing / real-money IAP | No in the current build |
+| Target age | 13+ (verify in Play Console questionnaires) |
 | Internet required | Yes |
+| Support email | `quizroyaleshowdown@gmail.com` |
 
-## Contact email
+## Data-safety working notes
 
-`quizroyaleshowdown@gmail.com` — set once as `LEGAL_CONTACT_EMAIL` in
-`functions/legal.ts` and rendered into the Privacy Policy, the Terms, and the legal
-index, so the listing and the hosted documents cannot drift apart.
+Verify these against the exact release build before submitting the Play Console Data safety form.
 
-## Data safety declaration
+### Registered accounts
 
-Answer the Play Console Data safety form as follows. Every line matches what the
-code actually does — this section exists so the declaration and the app can't
-drift apart.
+The current application code uses data including:
+- username/display name
+- email address
+- account/user identifiers and authentication credentials/tokens
+- gameplay statistics and leaderboard/progression data
+- friend relationships and presence state
+- store inventory, virtual currency, cosmetics, power-up state, and seasonal progression
 
-**Data collected and linked to the user (registered accounts only)**
-- Email address — App functionality, Account management. Required. Not shared.
-- Name (username) — App functionality. Required. Not shared. *Publicly visible on leaderboards.*
-- User IDs — App functionality. Required. Not shared.
-- Other in-app actions (game stats) — App functionality. Required. Not shared.
+### Guest play
 
-**Data collected but NOT linked to the user (guest play)**
-- User IDs (temporary guest ID) — App functionality. Required. Not shared.
-- Other in-app actions (game stats) — App functionality. Required. Not shared.
+Guest sessions use temporary guest identifiers and gameplay/progression state required to provide the game.
 
-**Not collected:** location, financial info, health, photos, videos, audio,
-files, contacts, calendar, SMS, call logs, installed apps, device advertising ID.
+### Infrastructure
 
-**Security practices**
-- Data is encrypted in transit (TLS for HTTPS and WSS). ✅
-- Users can request account deletion via `quizroyaleshowdown@gmail.com`. ✅
-- Passwords are stored only as PBKDF2-SHA256 hashes. ✅
+- Cloudflare Workers and Durable Objects handle matchmaking and real-time game-room coordination.
+- Railway hosts the persistent API.
+- PostgreSQL stores persistent application data.
+- Redis is used for caching/coordination.
+- Network traffic uses HTTPS/WSS where configured in production.
+
+Do not claim that persistent account data lives only on Cloudflare; that was true of an older branch and is not true of the Railway implementation.
 
 ## Phone screenshots
 
-Seven real captures from the running build live in `store/screenshots/phone/`, in
-listing order:
+The repository contains seven Play-compatible reference captures under `store/screenshots/phone/`:
 
-1. `01-main.png` — main screen: guest identity, live session countdown, Register button
-2. `02-quickstart.png` — Quick Match countdown lobby
-3. `03-question.png` — live round, 6 players standing, power-ups and opponent rail
-4. `04-tournament.png` — Tournament lobby: 15 rounds, 2 lives
-5. `05-midround.png` — another live question mid-match
-6. `06-register.png` — registration screen with the legal links
-7. `07-standings.png` — world leaderboard with category tabs
+1. `01-main.png` — main screen
+2. `02-quickstart.png` — Quick Match lobby/countdown
+3. `03-question.png` — live trivia round
+4. `04-tournament.png` — Tournament lobby
+5. `05-midround.png` — mid-round gameplay
+6. `06-register.png` — registration screen
+7. `07-standings.png` — leaderboard/standings
 
-Each is 810 x 1616, 24-bit PNG, no alpha.
+The images are 810 × 1616 PNGs, padded to satisfy Google Play's phone-screenshot aspect-ratio limit without cropping the captured UI.
 
-The originals were 720 x 1616 — a 2.24:1 ratio that Play **rejects**, because the
-longest side may not exceed twice the shortest. They are padded to 810 px wide with
-the app's own canvas ink (`#080B14`), which meets the 2:1 limit exactly without
-cropping any UI.
+These captures came from the older `main` branch. They are useful references and may still match the current UI, but re-check them against the final Railway build before publishing because the Railway branch has newer account recovery, friends/invites, store, progression, and backend integration work.
 
 ## Still required before publishing
 
-1. **Play Console app record** — Google's API cannot create it; see below.
-2. **Feature graphic** — 1024 x 500, JPEG or 24-bit PNG, no alpha. Not yet made.
-3. Complete the Play Console content rating and target audience questionnaires.
-4. If you incorporate, update `LEGAL_ENTITY` in `functions/legal.ts`.
+- Verify the privacy-policy URL is publicly reachable from a logged-out browser.
+- Re-check every Data safety answer against the exact release build and production infrastructure.
+- Complete the Play Console content-rating and target-audience questionnaires.
+- Create/verify the 1024 × 500 feature graphic.
+- Replace any screenshot that no longer matches the current Railway build.

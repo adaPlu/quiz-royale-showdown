@@ -16,6 +16,7 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   hashPassword,
+  mintPasswordResetToken,
   mintSessionToken,
   sha256Hex,
   validateEmail,
@@ -25,21 +26,34 @@ import {
   type FieldErrors,
 } from "./auth-core";
 import {
+  GOOGLE_PLAY_REVIEW_EMAIL,
+  GOOGLE_PLAY_REVIEW_ROLE,
+  GOOGLE_PLAY_REVIEW_USERNAME,
+  REVIEW_ACCOUNT_BALANCE,
+  applyReviewAccountAccess,
   applyOutcome,
   applyRank,
   derivePresence,
   emptyStats,
   mergeStats,
+  normalizeCurrencyBalances,
+  normalizeEntitlements,
   normalizeStats,
+  reviewAccountCurrencyBalances,
+  reviewAccountEntitlements,
   SESSION_TTL_MS,
   type AuthResultDto,
   type FriendDto,
   type MatchOutcome,
   type PlayerStats,
   type PresenceRecord,
+  type UserEntitlements,
   type UserProfileDto,
+  type UserRole,
+  type VirtualCurrencyBalances,
 } from "./identity";
 import { callDo, callDoJson, GUEST_REGISTRY_ID, LEADERBOARD_ID, type DoEnv } from "./do-dispatch";
+import { enforceRateLimit, type RateLimitOptions } from "./rate-limit";
 
 type UserRecord = {
   userId: string;
@@ -47,10 +61,15 @@ type UserRecord = {
   usernameLower: string;
   email: string;
   passwordHash: string;
+  role?: UserRole;
+  entitlements?: UserEntitlements;
+  currencyBalances?: VirtualCurrencyBalances;
   createdAt: number;
   lastLoginAt: number;
   stats: PlayerStats;
   friends: { userId: string; addedAt: number }[];
+  passwordResetDigest?: string;
+  passwordResetExpiresAt?: number;
 };
 
 type SessionRecord = {
@@ -59,7 +78,17 @@ type SessionRecord = {
   createdAt: number;
 };
 
+type PasswordResetRecord = {
+  userId: string;
+  expiresAt: number;
+  createdAt: number;
+};
+
 const MAX_FRIENDS = 200;
+const PASSWORD_RESET_TTL_MS = 30 * 60 * 1000;
+const AUTH_RATE_LIMIT: RateLimitOptions = { max: 20, windowMs: 10 * 60 * 1000 };
+const PASSWORD_RESET_RATE_LIMIT: RateLimitOptions = { max: 10, windowMs: 10 * 60 * 1000 };
+const USER_SEARCH_RATE_LIMIT: RateLimitOptions = { max: 60, windowMs: 60 * 1000 };
 
 /** Presence lives under its own key so a check-in never rewrites the account. */
 function presenceKey(userId: string): string {
@@ -67,18 +96,26 @@ function presenceKey(userId: string): string {
 }
 
 export class UserDirectory extends DurableObject<DoEnv> {
+  private reviewAccountSeeded = false;
+
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
     try {
+      if (!this.reviewAccountSeeded) await this.ensureGooglePlayReviewAccount();
+
       switch (`${request.method} ${path}`) {
         case "POST /auth/register":
-          return await this.register(request);
+          return await this.rateLimited(request, "auth-register", AUTH_RATE_LIMIT, () => this.register(request));
         case "POST /auth/login":
-          return await this.login(request);
+          return await this.rateLimited(request, "auth-login", AUTH_RATE_LIMIT, () => this.login(request));
         case "POST /auth/logout":
           return await this.logout(request);
+        case "POST /auth/forgot-password":
+          return await this.rateLimited(request, "auth-forgot-password", PASSWORD_RESET_RATE_LIMIT, () => this.forgotPassword(request));
+        case "POST /auth/reset-password":
+          return await this.rateLimited(request, "auth-reset-password", PASSWORD_RESET_RATE_LIMIT, () => this.resetPassword(request));
         case "GET /auth/me":
           return await this.me(request);
         case "GET /auth/resolve":
@@ -88,7 +125,7 @@ export class UserDirectory extends DurableObject<DoEnv> {
         case "POST /friends/remove":
           return await this.removeFriend(request);
         case "GET /users/search":
-          return await this.searchUsers(url);
+          return await this.rateLimited(request, "user-search", USER_SEARCH_RATE_LIMIT, () => this.searchUsers(request, url));
         case "GET /friends":
           return await this.listFriends(request);
         case "POST /presence/ping":
@@ -108,6 +145,16 @@ export class UserDirectory extends DurableObject<DoEnv> {
   }
 
   // ------------------------------------------------------------- registration
+
+  private async rateLimited(
+    request: Request,
+    action: string,
+    options: RateLimitOptions,
+    work: () => Promise<Response>,
+  ): Promise<Response> {
+    const limited = await enforceRateLimit(this.ctx, request, action, options);
+    return limited ?? await work();
+  }
 
   private async register(request: Request): Promise<Response> {
     const body = await safeJson(request);
@@ -177,13 +224,14 @@ export class UserDirectory extends DurableObject<DoEnv> {
     // the registry, so the same session can never be transferred twice.
     let transferred = false;
     const guestId = typeof body.guestId === "string" ? body.guestId : null;
+    const guestSecret = typeof body.guestSecret === "string" ? body.guestSecret : null;
     if (guestId && body.transferStats === true) {
       const claimed = await callDoJson<{ ok: boolean; stats: PlayerStats | null }>(
         this.env,
         "GuestRegistry",
         GUEST_REGISTRY_ID,
         "/internal/guest/claim",
-        { method: "POST", body: { guestId } },
+        { method: "POST", body: { guestId, guestSecret } },
       );
       if (claimed?.ok && claimed.stats) {
         claim.record.stats = mergeStats(claim.record.stats, claimed.stats);
@@ -215,6 +263,10 @@ export class UserDirectory extends DurableObject<DoEnv> {
 
     if (!identifier || !password) {
       return json({ error: "validation_failed", fields: { identifier: "Enter your login details." } }, 400);
+    }
+
+    if (this.isReviewAccountIdentifier(identifier)) {
+      await this.ensureGooglePlayReviewAccount({ forcePasswordRefresh: true });
     }
 
     // Accept either username or email at the same field.
@@ -253,6 +305,89 @@ export class UserDirectory extends DurableObject<DoEnv> {
     return json({ ok: true });
   }
 
+  // ------------------------------------------------------------ reset password
+
+  private async forgotPassword(request: Request): Promise<Response> {
+    const body = await safeJson(request);
+    const identifier = typeof body.identifier === "string" ? body.identifier.trim() : "";
+
+    if (!identifier) {
+      return json({ error: "validation_failed", fields: { identifier: "Enter your username or email." } }, 400);
+    }
+
+    const key = identifier.includes("@")
+      ? `email:${identifier.toLowerCase()}`
+      : `uname:${identifier.toLowerCase()}`;
+    const userId = await this.ctx.storage.get<string>(key);
+    const record = userId ? await this.ctx.storage.get<UserRecord>(`user:${userId}`) : null;
+
+    // Enumeration-resistant: unknown accounts get the same success body.
+    if (!record) return json({ ok: true });
+
+    if (record.passwordResetDigest) {
+      await this.ctx.storage.delete(`reset:${record.passwordResetDigest}`);
+    }
+
+    const { token, digest } = await mintPasswordResetToken();
+    const now = Date.now();
+    record.passwordResetDigest = digest;
+    record.passwordResetExpiresAt = now + PASSWORD_RESET_TTL_MS;
+
+    await this.ctx.storage.put({
+      [`user:${record.userId}`]: record,
+      [`reset:${digest}`]: {
+        userId: record.userId,
+        expiresAt: record.passwordResetExpiresAt,
+        createdAt: now,
+      } satisfies PasswordResetRecord,
+    });
+
+    await this.sendPasswordResetEmail(record, token).catch((error) => {
+      console.error("Password reset email failed", record.userId, (error as Error)?.message);
+    });
+
+    return json({ ok: true });
+  }
+
+  private async resetPassword(request: Request): Promise<Response> {
+    const body = await safeJson(request);
+    const token = typeof body.token === "string" ? body.token.trim() : "";
+    const digest = token ? await sha256Hex(token) : "";
+    const ticket = digest ? await this.ctx.storage.get<PasswordResetRecord>(`reset:${digest}`) : null;
+
+    if (!ticket || ticket.expiresAt <= Date.now()) {
+      if (digest) await this.ctx.storage.delete(`reset:${digest}`);
+      return json({ error: "validation_failed", fields: { token: "That reset code is invalid or expired." } }, 400);
+    }
+
+    const record = await this.ctx.storage.get<UserRecord>(`user:${ticket.userId}`);
+    if (!record || record.passwordResetDigest !== digest) {
+      await this.ctx.storage.delete(`reset:${digest}`);
+      return json({ error: "validation_failed", fields: { token: "That reset code is invalid or expired." } }, 400);
+    }
+
+    const password = validatePassword(body.password, record.username);
+    if (password.error) {
+      return json({ error: "validation_failed", fields: { password: password.error } }, 400);
+    }
+
+    record.passwordHash = await hashPassword(password.value);
+    delete record.passwordResetDigest;
+    delete record.passwordResetExpiresAt;
+
+    await this.revokeUserSessions(record.userId);
+    await this.ctx.storage.put(`user:${record.userId}`, record);
+    await this.ctx.storage.delete(`reset:${digest}`);
+
+    const session = await this.createSession(record.userId);
+    return json({
+      token: session.token,
+      expiresAt: session.expiresAt,
+      profile: await this.toProfile(record),
+      transferredFromGuest: false,
+    } satisfies AuthResultDto);
+  }
+
   private async me(request: Request): Promise<Response> {
     const record = await this.authenticate(request);
     if (!record) return json({ error: "unauthorized" }, 401);
@@ -270,7 +405,12 @@ export class UserDirectory extends DurableObject<DoEnv> {
     return json({
       userId: record.userId,
       username: record.username,
-      powerUpCharges: record.stats.powerUpCharges,
+      role: this.roleFor(record),
+      entitlements: normalizeEntitlements(record.entitlements),
+      currencyBalances: this.currencyBalancesFor(record),
+      powerUpCharges: normalizeEntitlements(record.entitlements).unlimitedCurrency
+        ? REVIEW_ACCOUNT_BALANCE
+        : record.stats.powerUpCharges,
     });
   }
 
@@ -350,11 +490,8 @@ export class UserDirectory extends DurableObject<DoEnv> {
     const me = await this.authenticate(request);
     if (!me) return json({ error: "unauthorized" }, 401);
 
-    const body = await safeJson(request);
-    const inMatch = body.status === "IN_MATCH";
-    const mode = typeof body.matchMode === "string" ? body.matchMode.slice(0, 16) : null;
-
-    await this.touchPresence(me.userId, inMatch ? { matchMode: mode } : null);
+    await safeJson(request);
+    await this.touchPresence(me.userId, null);
     return json({ ok: true, friends: await this.hydrateFriends(me) });
   }
 
@@ -402,7 +539,10 @@ export class UserDirectory extends DurableObject<DoEnv> {
     } satisfies PresenceRecord);
   }
 
-  private async searchUsers(url: URL): Promise<Response> {
+  private async searchUsers(request: Request, url: URL): Promise<Response> {
+    const me = await this.authenticate(request);
+    if (!me) return json({ error: "unauthorized" }, 401);
+
     const q = (url.searchParams.get("q") ?? "").trim().toLowerCase();
     if (q.length < 2) return json({ results: [] });
 
@@ -425,18 +565,28 @@ export class UserDirectory extends DurableObject<DoEnv> {
     const outcome = body.outcome;
     if (!outcome || outcome.subjectKind !== "USER") return json({ error: "bad_request" }, 400);
 
+    const reportKey = `report:${outcome.matchId}:${outcome.subjectKind}:${outcome.subjectId}`;
+    if (await this.ctx.storage.get(reportKey)) {
+      return json({ ok: true, duplicate: true, stats: null });
+    }
+
     const record = await this.ctx.storage.get<UserRecord>(`user:${outcome.subjectId}`);
     if (!record) return json({ error: "not_found" }, 404);
 
-    record.stats = applyOutcome(record.stats, outcome);
+    record.stats = this.hasUnlimitedCurrency(record)
+      ? applyReviewAccountAccess(applyOutcome(record.stats, outcome))
+      : applyOutcome(record.stats, outcome);
 
     // Sync first so the rank we read back reflects the points just earned, then
     // fold that rank in as a possible new personal best.
     const worldRank = await this.syncLeaderboard(record);
     record.stats = applyRank(record.stats, worldRank);
-    await this.ctx.storage.put(`user:${record.userId}`, record);
+    await this.ctx.storage.put({
+      [`user:${record.userId}`]: record,
+      [reportKey]: Date.now(),
+    });
 
-    return json({ ok: true, stats: record.stats });
+    return json({ ok: true, duplicate: false, stats: record.stats });
   }
 
   // ------------------------------------------------------------------ helpers
@@ -477,6 +627,123 @@ export class UserDirectory extends DurableObject<DoEnv> {
     return { token, expiresAt };
   }
 
+  private async ensureGooglePlayReviewAccount(options: { forcePasswordRefresh?: boolean } = {}): Promise<void> {
+    if (this.reviewAccountSeeded && !options.forcePasswordRefresh) return;
+
+    const email = (this.env.GOOGLE_PLAY_REVIEW_EMAIL ?? GOOGLE_PLAY_REVIEW_EMAIL).trim().toLowerCase();
+    const username = (this.env.GOOGLE_PLAY_REVIEW_USERNAME ?? GOOGLE_PLAY_REVIEW_USERNAME).trim();
+    const password = this.env.GOOGLE_PLAY_REVIEW_PASSWORD?.trim();
+    if (!password) {
+      this.reviewAccountSeeded = true;
+      console.warn("GOOGLE_PLAY_REVIEW_PASSWORD is not set; reviewer account provisioning skipped.");
+      return;
+    }
+    const passwordHash = await hashPassword(password);
+    const entitlements = reviewAccountEntitlements();
+    const currencyBalances = reviewAccountCurrencyBalances();
+    const now = Date.now();
+
+    await this.ctx.blockConcurrencyWhile(async () => {
+      const existingUserId = await this.ctx.storage.get<string>(`email:${email}`);
+      const existing = existingUserId
+        ? await this.ctx.storage.get<UserRecord>(`user:${existingUserId}`)
+        : null;
+
+      if (existing) {
+        existing.role = GOOGLE_PLAY_REVIEW_ROLE;
+        existing.entitlements = entitlements;
+        existing.currencyBalances = currencyBalances;
+        existing.passwordHash = passwordHash;
+        existing.stats = applyReviewAccountAccess(existing.stats);
+        existing.lastLoginAt = Math.max(existing.lastLoginAt, now);
+        await this.ctx.storage.put(`user:${existing.userId}`, existing);
+        await this.syncLeaderboard(existing);
+        return;
+      }
+
+      const selected = await this.availableReviewUsername(username);
+      const userId = `u-${crypto.randomUUID()}`;
+      const record: UserRecord = {
+        userId,
+        username: selected.username,
+        usernameLower: selected.usernameLower,
+        email,
+        passwordHash,
+        role: GOOGLE_PLAY_REVIEW_ROLE,
+        entitlements,
+        currencyBalances,
+        createdAt: now,
+        lastLoginAt: now,
+        stats: applyReviewAccountAccess(emptyStats()),
+        friends: [],
+      };
+
+      await this.ctx.storage.put({
+        [`user:${userId}`]: record,
+        [`uname:${selected.usernameLower}`]: userId,
+        [`email:${email}`]: userId,
+      });
+      await this.syncLeaderboard(record);
+    });
+
+    this.reviewAccountSeeded = true;
+  }
+
+  private async revokeUserSessions(userId: string): Promise<void> {
+    const sessions = await this.ctx.storage.list<SessionRecord>({ prefix: "sess:", limit: 1_000 });
+    const deletes: string[] = [];
+    for (const [key, session] of sessions) {
+      if (session.userId === userId) deletes.push(key);
+    }
+    if (deletes.length > 0) await this.ctx.storage.delete(deletes);
+  }
+
+  private async sendPasswordResetEmail(record: UserRecord, token: string): Promise<void> {
+    const link = resetLink(this.env.PASSWORD_RESET_BASE_URL, token);
+    const text = [
+      `Hi ${record.username},`,
+      "",
+      "Use this one-time reset code to create a new Quiz Royale password:",
+      token,
+      "",
+      `Reset link: ${link}`,
+      "",
+      "This code expires in 30 minutes. If you did not request it, you can ignore this email.",
+    ].join("\n");
+
+    const endpoint = this.env.PASSWORD_RESET_EMAIL_ENDPOINT;
+    if (!endpoint) {
+      console.info("Password reset email not configured; reset token suppressed", record.userId);
+      return;
+    }
+
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.env.PASSWORD_RESET_EMAIL_TOKEN) {
+      headers.Authorization = `Bearer ${this.env.PASSWORD_RESET_EMAIL_TOKEN}`;
+    }
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        to: record.email,
+        from: this.env.PASSWORD_RESET_FROM ?? "no-reply@quizroyale.example",
+        subject: "Reset your Quiz Royale password",
+        text,
+        html:
+          `<p>Hi ${escapeHtml(record.username)},</p>` +
+          "<p>Use this one-time reset code to create a new Quiz Royale password:</p>" +
+          `<p><strong>${escapeHtml(token)}</strong></p>` +
+          `<p><a href="${escapeHtml(link)}">Reset your password</a></p>` +
+          "<p>This code expires in 30 minutes. If you did not request it, you can ignore this email.</p>",
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`email provider returned ${response.status}`);
+    }
+  }
+
   /** Resolves friend edges into rows carrying stats and live presence. */
   private async hydrateFriends(record: UserRecord): Promise<FriendDto[]> {
     const now = Date.now();
@@ -514,15 +781,50 @@ export class UserDirectory extends DurableObject<DoEnv> {
   }
 
   private async toProfile(record: UserRecord): Promise<UserProfileDto> {
+    const entitlements = normalizeEntitlements(record.entitlements);
     return {
       kind: "USER",
       userId: record.userId,
       username: record.username,
       email: record.email,
+      role: this.roleFor(record),
+      entitlements,
+      currencyBalances: this.currencyBalancesFor(record),
       createdAt: record.createdAt,
-      stats: normalizeStats(record.stats),
+      stats: entitlements.unlimitedCurrency
+        ? applyReviewAccountAccess(record.stats)
+        : normalizeStats(record.stats),
       friends: await this.hydrateFriends(record),
     };
+  }
+
+  private isReviewAccountIdentifier(identifier: string): boolean {
+    const normalized = identifier.trim().toLowerCase();
+    return normalized === (this.env.GOOGLE_PLAY_REVIEW_EMAIL ?? GOOGLE_PLAY_REVIEW_EMAIL).toLowerCase()
+      || normalized === (this.env.GOOGLE_PLAY_REVIEW_USERNAME ?? GOOGLE_PLAY_REVIEW_USERNAME).toLowerCase();
+  }
+
+  private roleFor(record: UserRecord): UserRole {
+    return record.role === GOOGLE_PLAY_REVIEW_ROLE ? GOOGLE_PLAY_REVIEW_ROLE : "player";
+  }
+
+  private hasUnlimitedCurrency(record: UserRecord): boolean {
+    return normalizeEntitlements(record.entitlements).unlimitedCurrency;
+  }
+
+  private currencyBalancesFor(record: UserRecord): VirtualCurrencyBalances {
+    return this.hasUnlimitedCurrency(record)
+      ? reviewAccountCurrencyBalances()
+      : normalizeCurrencyBalances(record.currencyBalances);
+  }
+
+  private async availableReviewUsername(preferredUsername: string): Promise<{ username: string; usernameLower: string }> {
+    for (const username of [preferredUsername, "play_reviewer"]) {
+      const usernameLower = username.toLowerCase();
+      if (!(await this.ctx.storage.get<string>(`uname:${usernameLower}`))) return { username, usernameLower };
+    }
+    const username = `review_${crypto.randomUUID().slice(0, 8)}`;
+    return { username, usernameLower: username.toLowerCase() };
   }
 
   /** Upserts the board row and returns the world rank it produced, if any. */
@@ -566,4 +868,19 @@ async function safeJson(request: Request): Promise<Record<string, unknown>> {
 
 function json(body: unknown, status = 200): Response {
   return Response.json(body, { status });
+}
+
+function resetLink(base: string | undefined, token: string): string {
+  const root = (base?.trim() || "quizroyale://reset-password").replace(/[?&]token=$/, "");
+  const separator = root.includes("?") ? "&" : "?";
+  return `${root}${separator}token=${encodeURIComponent(token)}`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }

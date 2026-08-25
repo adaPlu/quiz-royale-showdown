@@ -1,0 +1,297 @@
+name: Release Web Multiplayer Production
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+concurrency:
+  # The bounded verifier supersedes the legacy group, whose final pre-fix run
+  # can retain a Node network handle indefinitely.
+  group: web-multiplayer-production-bounded
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  deployments: write
+
+env:
+  PAGES_ORIGIN: https://quiz-royale-showdown.pages.dev
+  CUSTOM_WEB_ORIGIN: https://play.quizroyale.gg
+  RAILWAY_API_URL: https://railway-api-production-5772.up.railway.app
+  MATCH_API_URL: https://quiz-royale-functions.adapluguez.workers.dev
+  CLOUDFLARE_PAGES_PROJECT: quiz-royale-showdown
+  CLOUDFLARE_PAGES_BRANCH: Railway-API-Implementation
+
+jobs:
+  worker:
+    name: Test and deploy multiplayer Worker
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: functions/package-lock.json
+
+      - name: Verify Cloudflare credentials
+        shell: bash
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "::error::Missing CLOUDFLARE_API_TOKEN"; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "::error::Missing CLOUDFLARE_ACCOUNT_ID"; exit 1; }
+
+      - name: Install Worker dependencies
+        run: npm ci --prefix functions
+
+      - name: Test Worker
+        run: npm test --prefix functions
+
+      - name: Build Worker deployment bundle
+        working-directory: functions
+        run: npm exec -- wrangler deploy --dry-run
+
+      - name: Deploy Worker without replacing dashboard secrets
+        working-directory: functions
+        run: npm exec -- wrangler deploy --keep-vars
+
+      - name: Verify deployed Worker version and configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 24); do
+            HEALTH_STATUS=$(curl -sS -o /tmp/worker-health.json -w '%{http_code}' \
+              "$MATCH_API_URL/health" \
+              -H "Origin: $PAGES_ORIGIN" || true)
+            TICKET_STATUS=$(curl -sS -o /tmp/worker-ticket.json -w '%{http_code}' \
+              -X POST "$MATCH_API_URL/websocket-ticket" \
+              -H "Origin: $PAGES_ORIGIN" \
+              -H 'Content-Type: application/json' \
+              --data '{}' || true)
+
+            if [ "$HEALTH_STATUS" = "200" ] \
+              && jq -e '
+                .ok == true
+                and .configuration.railwayApiUrl == true
+                and .configuration.railwayInternalToken == true
+                and .configuration.matchRoomTicketSecret == true
+              ' /tmp/worker-health.json >/dev/null \
+              && [ "$TICKET_STATUS" = "400" ] \
+              && jq -e '.error == "invalid_socket_ticket_request"' /tmp/worker-ticket.json >/dev/null; then
+              echo "Current Worker and /websocket-ticket are live"
+              exit 0
+            fi
+
+            echo "Attempt $attempt: health=$HEALTH_STATUS ticket=$TICKET_STATUS"
+            sleep 5
+          done
+
+          echo "::error::Worker did not expose the current socket-ticket route with all production bindings"
+          echo "Worker health response:"
+          cat /tmp/worker-health.json || true
+          echo
+          echo "Worker socket-ticket response:"
+          cat /tmp/worker-ticket.json || true
+          exit 1
+
+  pages:
+    name: Build and deploy Pages after Worker
+    needs: worker
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            webapp/package-lock.json
+            functions/package-lock.json
+
+      - name: Verify Cloudflare credentials
+        shell: bash
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "::error::Missing CLOUDFLARE_API_TOKEN"; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "::error::Missing CLOUDFLARE_ACCOUNT_ID"; exit 1; }
+
+      - name: Install locked web dependencies
+        run: npm ci --prefix webapp
+
+      - name: Build production web client
+        run: npm run build --prefix webapp
+
+      - name: Install locked deployment CLI
+        run: npm ci --prefix functions
+
+      - name: Deploy Pages bundle
+        working-directory: webapp
+        run: >-
+          ../functions/node_modules/.bin/wrangler pages deploy dist
+          --project-name "$CLOUDFLARE_PAGES_PROJECT"
+          --branch "$CLOUDFLARE_PAGES_BRANCH"
+          --commit-hash "${{ github.sha }}"
+
+      - name: Wait for canonical Pages origin
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 36); do
+            CODE=$(curl -L -sS -o /tmp/web.html -w '%{http_code}' \
+              --connect-timeout 5 --max-time 15 "$PAGES_ORIGIN/" || true)
+            if [ "$CODE" = "200" ] && grep -qi 'Quiz Royale' /tmp/web.html; then
+              echo "$PAGES_ORIGIN is live"
+              exit 0
+            fi
+            echo "Attempt $attempt: Pages returned $CODE"
+            sleep 5
+          done
+          echo "::error::$PAGES_ORIGIN did not become healthy"
+          exit 1
+
+  live-multiplayer:
+    name: Guest to WebSocket STATE production smoke
+    needs: pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      WEB_ORIGIN: https://quiz-royale-showdown.pages.dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run real guest multiplayer transaction
+        run: node .github/scripts/live-web-multiplayer-smoke.mjs
+
+  custom-domain:
+    name: Diagnose and attach play.quizroyale.gg
+    needs: live-multiplayer
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      DNS_ZONE_NAME: quizroyale.gg
+      DNS_RECORD_NAME: play.quizroyale.gg
+    steps:
+      - name: Check public domain delegation
+        id: delegation
+        shell: bash
+        run: |
+          set -u
+          echo "delegated=false" >> "$GITHUB_OUTPUT"
+          if ! curl -fsS --get 'https://cloudflare-dns.com/dns-query' \
+            -H 'Accept: application/dns-json' \
+            --data-urlencode "name=$DNS_ZONE_NAME" \
+            --data-urlencode 'type=NS' \
+            > /tmp/delegation.json; then
+            echo "::warning::Could not query public DNS delegation for $DNS_ZONE_NAME"
+            exit 0
+          fi
+
+          DNS_STATUS=$(jq -r '.Status // -1' /tmp/delegation.json)
+          NS_COUNT=$(jq '[.Answer[]? | select(.type == 2)] | length' /tmp/delegation.json)
+          if [ "$DNS_STATUS" = "3" ]; then
+            echo "::warning::$DNS_ZONE_NAME is NXDOMAIN at the registry. Delegate/register the apex at the registrar before play.quizroyale.gg can serve Pages."
+            {
+              echo "### Custom domain blocked outside deployment"
+              echo
+              echo "- \`$DNS_ZONE_NAME\` returns NXDOMAIN from public DNS."
+              echo "- Register or restore the domain and delegate it to the intended Cloudflare nameservers."
+              echo "- Re-run this workflow after delegation; it will request Pages attachment without deleting or replacing DNS records."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [ "$DNS_STATUS" = "0" ] && [ "$NS_COUNT" -gt 0 ]; then
+            echo "delegated=true" >> "$GITHUB_OUTPUT"
+            echo "$DNS_ZONE_NAME has public nameserver delegation"
+            exit 0
+          fi
+
+          echo "::warning::$DNS_ZONE_NAME is not currently delegated (DNS status $DNS_STATUS, NS answers $NS_COUNT)"
+          {
+            echo "### Custom domain pending delegation"
+            echo
+            echo "Public DNS did not return nameservers for \`$DNS_ZONE_NAME\`; no DNS records were changed."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attach Pages custom domain when delegated
+        id: attach
+        if: steps.delegation.outputs.delegated == 'true'
+        shell: bash
+        run: |
+          set -u
+          echo "attached=false" >> "$GITHUB_OUTPUT"
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::warning::Cloudflare credentials are missing; skipping custom-domain attachment"
+            exit 0
+          fi
+
+          API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$CLOUDFLARE_PAGES_PROJECT/domains"
+          AUTH="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
+          if ! curl -sS -H "$AUTH" "$API" > /tmp/pages-domains.json \
+            || ! jq -e '.success == true' /tmp/pages-domains.json >/dev/null; then
+            echo "::warning::Unable to read Pages custom domains; the token needs Cloudflare Pages Edit permission"
+            cat /tmp/pages-domains.json || true
+            exit 0
+          fi
+
+          if ! jq -e --arg domain "$DNS_RECORD_NAME" '.result[]? | select(.name == $domain)' /tmp/pages-domains.json >/dev/null; then
+            if ! curl -sS -X POST "$API" \
+              -H "$AUTH" \
+              -H 'Content-Type: application/json' \
+              --data "$(jq -nc --arg name "$DNS_RECORD_NAME" '{name:$name}')" \
+              > /tmp/pages-domain-create.json \
+              || ! jq -e '.success == true' /tmp/pages-domain-create.json >/dev/null; then
+              echo "::warning::Pages did not accept $DNS_RECORD_NAME"
+              cat /tmp/pages-domain-create.json || true
+              exit 0
+            fi
+          fi
+
+          echo "attached=true" >> "$GITHUB_OUTPUT"
+
+      - name: Poll and report custom-domain activation
+        if: steps.attach.outputs.attached == 'true'
+        shell: bash
+        run: |
+          set -u
+          API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$CLOUDFLARE_PAGES_PROJECT/domains"
+          AUTH="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
+          for attempt in $(seq 1 30); do
+            curl -sS -H "$AUTH" "$API" > /tmp/pages-domains.json || true
+            STATUS=$(jq -r --arg domain "$DNS_RECORD_NAME" \
+              '.result[]? | select(.name == $domain) | .status // empty' /tmp/pages-domains.json 2>/dev/null)
+            CODE=$(curl -L -sS -o /tmp/custom-web.html -w '%{http_code}' \
+              --connect-timeout 5 --max-time 15 "$CUSTOM_WEB_ORIGIN/" || true)
+            if [ "$STATUS" = "active" ] \
+              && [ "$CODE" = "200" ] \
+              && grep -qi 'Quiz Royale' /tmp/custom-web.html; then
+              {
+                echo "### Custom domain active"
+                echo
+                echo "- $CUSTOM_WEB_ORIGIN is attached to $CLOUDFLARE_PAGES_PROJECT and returned HTTP 200."
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "Attempt $attempt: domain_status=$STATUS http=$CODE"
+            sleep 10
+          done
+
+          echo "::warning::$CUSTOM_WEB_ORIGIN is attached but not active yet; core multiplayer remains live on $PAGES_ORIGIN"
+          {
+            echo "### Custom domain still pending"
+            echo
+            echo "- Pages status: \`${STATUS:-unknown}\`"
+            echo "- HTTP status: \`${CODE:-unknown}\`"
+            echo "- No DNS records were deleted or replaced by this workflow."
+          } >> "$GITHUB_STEP_SUMMARY"

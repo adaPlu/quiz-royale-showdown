@@ -8,7 +8,9 @@ import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocketSession
 import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.ktor.client.request.parameter
+import io.ktor.client.request.url
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.websocket.Frame
 import io.ktor.websocket.WebSocketSession
@@ -40,13 +42,12 @@ class GameClient {
         install(ContentNegotiation) { json(json) }
     }
 
-    private val baseUrl: String get() = Backend.baseUrl
+    private val baseUrl: String get() = Backend.matchHttpBase
 
     /** Asks the matchmaker which room to join for [mode]. */
-    suspend fun findMatch(mode: GameMode, playerId: String): MatchmakeResponse {
+    suspend fun findMatch(mode: GameMode): MatchmakeResponse {
         return http.get("$baseUrl/matchmake") {
             parameter("mode", mode.name)
-            parameter("playerId", playerId)
         }.body()
     }
 
@@ -59,21 +60,27 @@ class GameClient {
      */
     fun connect(
         roomId: String,
+        roomTicket: String,
         credentials: MatchCredentials,
         name: String,
         mode: GameMode,
         outbound: OutboundQueue
     ): Flow<ServerMessage> = flow {
         val params = buildList {
-            credentials.token?.let { add("token" to it) }
-            credentials.guestId?.let { add("guestId" to it) }
             add("name" to name)
             add("mode" to mode.name)
+            add("roomTicket" to roomTicket)
         }
         val query = params.joinToString("&") { (k, v) -> "$k=${URLEncoder.encode(v, "UTF-8")}" }
 
-        val session: WebSocketSession =
-            http.webSocketSession("${Backend.webSocketBase}/match/$roomId?$query")
+        val session: WebSocketSession = http.webSocketSession {
+            url("${Backend.webSocketBase}/match/$roomId?$query")
+            credentials.token?.let { header("Authorization", "Bearer $it") }
+            if (credentials.guestId != null && credentials.guestSecret != null) {
+                header("X-Guest-Id", credentials.guestId)
+                header("X-Guest-Secret", credentials.guestSecret)
+            }
+        }
 
         outbound.bind(session, json)
         try {

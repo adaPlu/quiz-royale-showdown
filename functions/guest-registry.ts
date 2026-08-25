@@ -29,7 +29,10 @@ import {
   type MatchOutcome,
   type PlayerStats,
 } from "./identity";
+import { mintSessionToken, sha256Hex } from "./auth-core";
 import { callDo, callDoJson, LEADERBOARD_ID, type DoEnv } from "./do-dispatch";
+import { DEFAULT_GUEST_NAME_BASE, incrementGuestName, MAX_GUEST_NAME_LENGTH } from "./guest-names";
+import { enforceRateLimit, type RateLimitOptions } from "./rate-limit";
 
 /**
  * Session-scoped guest state. Note what is absent by design: no email, no
@@ -42,6 +45,7 @@ type GuestSession = {
   createdAt: number;
   lastSeenAt: number;
   expiresAt: number;
+  guestSecretHash: string;
   /** Temporary counters. These die with the session unless transferred. */
   stats: PlayerStats;
 };
@@ -49,6 +53,8 @@ type GuestSession = {
 const SLOT_POOL_KEY = "free-slots";
 const NEXT_SLOT_KEY = "next-slot";
 const MAX_POOLED_SLOTS = 5_000;
+const GUEST_SESSION_RATE_LIMIT: RateLimitOptions = { max: 30, windowMs: 10 * 60 * 1000 };
+const GUEST_LIFECYCLE_RATE_LIMIT: RateLimitOptions = { max: 240, windowMs: 10 * 60 * 1000 };
 
 export class GuestRegistry extends DurableObject<DoEnv> {
   override async fetch(request: Request): Promise<Response> {
@@ -57,15 +63,15 @@ export class GuestRegistry extends DurableObject<DoEnv> {
     try {
       switch (`${request.method} ${url.pathname}`) {
         case "POST /guest/session":
-          return await this.issueOrRenew(request);
+          return await this.rateLimited(request, "guest-session", GUEST_SESSION_RATE_LIMIT, () => this.issueOrRenew(request));
         case "POST /guest/heartbeat":
-          return await this.heartbeat(request);
+          return await this.rateLimited(request, "guest-heartbeat", GUEST_LIFECYCLE_RATE_LIMIT, () => this.heartbeat(request));
         case "POST /guest/end":
-          return await this.endSession(request);
+          return await this.rateLimited(request, "guest-end", GUEST_LIFECYCLE_RATE_LIMIT, () => this.endSession(request));
         case "GET /guest/me":
-          return await this.currentSession(url);
+          return await this.currentSession(request, url);
         case "GET /internal/guest/resolve":
-          return await this.resolveGuest(url);
+          return await this.resolveGuest(request);
         case "POST /internal/guest/claim":
           return await this.claim(request);
         case "POST /internal/report":
@@ -79,6 +85,49 @@ export class GuestRegistry extends DurableObject<DoEnv> {
     }
   }
 
+  private async rateLimited(
+    request: Request,
+    action: string,
+    options: RateLimitOptions,
+    work: () => Promise<Response>,
+  ): Promise<Response> {
+    const limited = await enforceRateLimit(this.ctx, request, action, options);
+    return limited ?? await work();
+  }
+
+  private async availableGuestDisplayName(preferredName: string, excludeGuestId?: string): Promise<string> {
+    const base = preferredName || DEFAULT_GUEST_NAME_BASE;
+    const seed = preferredName ? base : `${DEFAULT_GUEST_NAME_BASE}00`;
+    const start = preferredName ? 0 : 1;
+
+    for (let offset = 0; offset < 100_000; offset += 1) {
+      const candidate = incrementGuestName(seed, start + offset);
+      if (!await this.guestDisplayNameTaken(candidate, excludeGuestId)) return candidate;
+    }
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const candidate = `${DEFAULT_GUEST_NAME_BASE}${crypto.randomUUID().slice(0, 6)}`.slice(0, MAX_GUEST_NAME_LENGTH);
+      if (!await this.guestDisplayNameTaken(candidate, excludeGuestId)) return candidate;
+    }
+
+    throw new Error("unable to allocate a unique guest display name");
+  }
+
+  private async guestDisplayNameTaken(candidate: string, excludeGuestId?: string): Promise<boolean> {
+    let startAfter: string | undefined;
+    do {
+      const sessions = await this.ctx.storage.list<GuestSession>({ prefix: "guest:", limit: 1_000, startAfter });
+      startAfter = undefined;
+      for (const [key, session] of sessions) {
+        startAfter = key;
+        if (session.guestId === excludeGuestId || session.expiresAt <= Date.now()) continue;
+        if (session.displayName.toLowerCase() === candidate.toLowerCase()) return true;
+      }
+    } while (startAfter);
+
+    return false;
+  }
+
   /**
    * Issues a fresh guest id, or renews the supplied one if it is still alive.
    * Called on app start, so a returning player inside the TTL keeps their run.
@@ -87,13 +136,17 @@ export class GuestRegistry extends DurableObject<DoEnv> {
     const body = await safeJson(request);
     const requestedName = sanitizeGuestName(body.displayName);
     const existingId = typeof body.guestId === "string" ? body.guestId : null;
+    const existingSecret = typeof body.guestSecret === "string" ? body.guestSecret : null;
 
     if (existingId) {
       const existing = await this.ctx.storage.get<GuestSession>(key(existingId));
-      if (existing && existing.expiresAt > Date.now()) {
+      if (existing && existing.expiresAt > Date.now() && await validGuestSecret(existing, existingSecret)) {
         existing.lastSeenAt = Date.now();
         existing.expiresAt = existing.lastSeenAt + GUEST_TTL_MS;
-        if (requestedName) existing.displayName = requestedName;
+        if (requestedName) existing.displayName = await this.availableGuestDisplayName(requestedName, existing.guestId);
+        else if (isLegacyAutoGuestDisplayName(existing.displayName)) {
+          existing.displayName = await this.availableGuestDisplayName("", existing.guestId);
+        }
         await this.ctx.storage.put(key(existingId), existing);
         await this.armSweep();
         return json({ guest: toDto(existing), reused: true });
@@ -103,31 +156,35 @@ export class GuestRegistry extends DurableObject<DoEnv> {
     const session = await this.ctx.blockConcurrencyWhile(async () => {
       const slot = await this.takeSlot();
       const now = Date.now();
+      const secret = await mintSessionToken();
       const fresh: GuestSession = {
         guestId: `g${slot}-${nonce()}`,
         slot,
-        displayName: requestedName || `Guest${slot}`,
+        displayName: await this.availableGuestDisplayName(requestedName),
         createdAt: now,
         lastSeenAt: now,
         expiresAt: now + GUEST_TTL_MS,
+        guestSecretHash: secret.digest,
         stats: emptyStats(),
       };
       await this.ctx.storage.put(key(fresh.guestId), fresh);
-      return fresh;
+      return { session: fresh, guestSecret: secret.token };
     });
 
     await this.armSweep();
-    return json({ guest: toDto(session), reused: false }, 201);
+    return json({ guest: toDto(session.session, session.guestSecret), reused: false }, 201);
   }
 
   private async heartbeat(request: Request): Promise<Response> {
     const body = await safeJson(request);
     const guestId = typeof body.guestId === "string" ? body.guestId : "";
+    const guestSecret = typeof body.guestSecret === "string" ? body.guestSecret : "";
     const session = await this.ctx.storage.get<GuestSession>(key(guestId));
 
     if (!session || session.expiresAt <= Date.now()) {
       return json({ error: "guest_expired", message: "This guest session has expired." }, 404);
     }
+    if (!await validGuestSecret(session, guestSecret)) return json({ error: "unauthorized" }, 401);
 
     session.lastSeenAt = Date.now();
     session.expiresAt = session.lastSeenAt + GUEST_TTL_MS;
@@ -139,29 +196,35 @@ export class GuestRegistry extends DurableObject<DoEnv> {
   private async endSession(request: Request): Promise<Response> {
     const body = await safeJson(request);
     const guestId = typeof body.guestId === "string" ? body.guestId : "";
+    const guestSecret = typeof body.guestSecret === "string" ? body.guestSecret : "";
     const session = await this.ctx.storage.get<GuestSession>(key(guestId));
     if (!session) return json({ ok: true, retired: false });
+    if (!await validGuestSecret(session, guestSecret)) return json({ error: "unauthorized" }, 401);
 
     await this.retire(session);
     return json({ ok: true, retired: true });
   }
 
-  private async currentSession(url: URL): Promise<Response> {
-    const guestId = url.searchParams.get("guestId") ?? "";
+  private async currentSession(request: Request, _url: URL): Promise<Response> {
+    const guestId = request.headers.get("X-Guest-Id")?.trim() || "";
+    const guestSecret = request.headers.get("X-Guest-Secret")?.trim() || "";
     const session = await this.ctx.storage.get<GuestSession>(key(guestId));
     if (!session || session.expiresAt <= Date.now()) {
       return json({ error: "guest_expired" }, 404);
     }
+    if (!await validGuestSecret(session, guestSecret)) return json({ error: "unauthorized" }, 401);
     return json({ guest: toDto(session) });
   }
 
   /** Internal: validates a guest id for the match socket handshake. */
-  private async resolveGuest(url: URL): Promise<Response> {
-    const guestId = url.searchParams.get("guestId") ?? "";
+  private async resolveGuest(request: Request): Promise<Response> {
+    const guestId = request.headers.get("X-Guest-Id")?.trim() || "";
+    const guestSecret = request.headers.get("X-Guest-Secret")?.trim() || "";
     const session = await this.ctx.storage.get<GuestSession>(key(guestId));
     if (!session || session.expiresAt <= Date.now()) {
       return json({ error: "guest_expired" }, 404);
     }
+    if (!await validGuestSecret(session, guestSecret)) return json({ error: "unauthorized" }, 401);
     // Playing counts as activity.
     session.lastSeenAt = Date.now();
     session.expiresAt = session.lastSeenAt + GUEST_TTL_MS;
@@ -181,10 +244,12 @@ export class GuestRegistry extends DurableObject<DoEnv> {
   private async claim(request: Request): Promise<Response> {
     const body = await safeJson(request);
     const guestId = typeof body.guestId === "string" ? body.guestId : "";
+    const guestSecret = typeof body.guestSecret === "string" ? body.guestSecret : "";
 
     const claimed = await this.ctx.blockConcurrencyWhile(async () => {
       const session = await this.ctx.storage.get<GuestSession>(key(guestId));
       if (!session || session.expiresAt <= Date.now()) return null;
+      if (!await validGuestSecret(session, guestSecret)) return null;
       await this.ctx.storage.delete(key(guestId));
       await this.releaseSlot(session.slot);
       return session;
@@ -200,6 +265,11 @@ export class GuestRegistry extends DurableObject<DoEnv> {
     const body = (await safeJson(request)) as { outcome?: MatchOutcome };
     const outcome = body.outcome;
     if (!outcome || outcome.subjectKind !== "GUEST") return json({ error: "bad_request" }, 400);
+
+    const reportKey = `report:${outcome.matchId}:${outcome.subjectKind}:${outcome.subjectId}`;
+    if (await this.ctx.storage.get(reportKey)) {
+      return json({ ok: true, duplicate: true, stats: null });
+    }
 
     const session = await this.ctx.storage.get<GuestSession>(key(outcome.subjectId));
     if (!session) return json({ error: "guest_expired" }, 404);
@@ -228,9 +298,12 @@ export class GuestRegistry extends DurableObject<DoEnv> {
     ).catch(() => null);
 
     session.stats = applyRank(session.stats, upsert?.worldRank ?? null);
-    await this.ctx.storage.put(key(session.guestId), session);
+    await this.ctx.storage.put({
+      [key(session.guestId)]: session,
+      [reportKey]: Date.now(),
+    });
 
-    return json({ ok: true, stats: session.stats });
+    return json({ ok: true, duplicate: false, stats: session.stats });
   }
 
   // -------------------------------------------------------------------- sweep
@@ -250,19 +323,32 @@ export class GuestRegistry extends DurableObject<DoEnv> {
 
     // Keep sweeping only while guests exist, so an idle registry costs nothing.
     if (remaining > 0) {
-      await this.env.DO.setAlarm?.("GuestRegistry", "main", now + GUEST_SWEEP_MS);
+      await this.setRegistryAlarm(now + GUEST_SWEEP_MS);
     }
   }
 
   private async armSweep(): Promise<void> {
-    const setAlarm = this.env.DO.setAlarm;
-    const getAlarm = this.env.DO.getAlarm;
-    if (!setAlarm || !getAlarm) return;
-    const existing = await getAlarm.call(this.env.DO, "GuestRegistry", "main").catch(() => null);
+    const existing = await this.getRegistryAlarm();
     if (existing === null || existing === undefined) {
-      await setAlarm
-        .call(this.env.DO, "GuestRegistry", "main", Date.now() + GUEST_SWEEP_MS)
-        .catch(() => undefined);
+      await this.setRegistryAlarm(Date.now() + GUEST_SWEEP_MS);
+    }
+  }
+
+  private async getRegistryAlarm(): Promise<number | null> {
+    try {
+      return await this.ctx.storage.getAlarm();
+    } catch {
+      const getAlarm = this.env.DO?.getAlarm;
+      if (!getAlarm) return null;
+      return await getAlarm.call(this.env.DO, "GuestRegistry", "main").catch(() => null);
+    }
+  }
+
+  private async setRegistryAlarm(scheduledTime: number | Date): Promise<void> {
+    try {
+      await this.ctx.storage.setAlarm(scheduledTime);
+    } catch {
+      await this.env.DO?.setAlarm?.("GuestRegistry", "main", scheduledTime).catch(() => undefined);
     }
   }
 
@@ -308,22 +394,32 @@ function key(guestId: string): string {
 }
 
 function nonce(): string {
-  return crypto.randomUUID().replace(/-/g, "").slice(0, 6);
+  return crypto.randomUUID().replace(/-/g, "");
 }
 
-function toDto(session: GuestSession): GuestSessionDto {
+function toDto(session: GuestSession, guestSecret?: string): GuestSessionDto {
   return {
     kind: "GUEST",
     guestId: session.guestId,
+    ...(guestSecret ? { guestSecret } : {}),
     displayName: session.displayName,
     expiresAt: session.expiresAt,
     stats: normalizeStats(session.stats),
   };
 }
 
+async function validGuestSecret(session: GuestSession, secret: string | null): Promise<boolean> {
+  if (!secret || !session.guestSecretHash) return false;
+  return await sha256Hex(secret) === session.guestSecretHash;
+}
+
 function sanitizeGuestName(raw: unknown): string {
   if (typeof raw !== "string") return "";
-  return raw.replace(/[\u0000-\u001F\u007F]/g, "").trim().slice(0, 16);
+  return raw.replace(/[\u0000-\u001F\u007F]/g, "").trim().slice(0, MAX_GUEST_NAME_LENGTH);
+}
+
+function isLegacyAutoGuestDisplayName(displayName: string): boolean {
+  return /^Player\d+$/i.test(displayName.trim());
 }
 
 async function safeJson(request: Request): Promise<Record<string, unknown>> {

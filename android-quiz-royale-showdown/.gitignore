@@ -36,3 +36,4 @@ local.properties
 .env
 rork-eslint.config.js
 app/src/main/java/**/Config.kt
+!app/src/main/java/com/rork/quizroyaleshowdown/Config.kt

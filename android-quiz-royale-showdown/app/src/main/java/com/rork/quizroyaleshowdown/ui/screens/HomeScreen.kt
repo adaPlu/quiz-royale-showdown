@@ -30,8 +30,10 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.EmojiEvents
 import androidx.compose.material.icons.filled.HourglassEmpty
 import androidx.compose.material.icons.filled.Leaderboard
+import androidx.compose.material.icons.filled.LocalMall
 import androidx.compose.material.icons.filled.PersonAddAlt1
 import androidx.compose.material.icons.filled.School
+import androidx.compose.material.icons.filled.Stars
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalTextStyle
@@ -83,6 +85,8 @@ fun HomeScreen(
     onRegister: () -> Unit,
     onSignIn: () -> Unit,
     onLeaderboard: () -> Unit,
+    onStore: () -> Unit,
+    onSeason: () -> Unit,
     onProfile: () -> Unit
 ) {
     val authState by authViewModel.uiState.collectAsStateWithLifecycle()
@@ -232,6 +236,27 @@ fun HomeScreen(
                         )
                     }
                 }
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                HomeActionCard(
+                    title = "Store",
+                    subtitle = "Power-ups, passes, cosmetics",
+                    icon = Icons.Filled.LocalMall,
+                    accent = Arena.Gold,
+                    onClick = onStore,
+                    modifier = Modifier.weight(1f)
+                )
+                HomeActionCard(
+                    title = "Season",
+                    subtitle = "Progress, tickets, rewards",
+                    icon = Icons.Filled.Stars,
+                    accent = Arena.Violet,
+                    onClick = onSeason,
+                    modifier = Modifier.weight(1f)
+                )
             }
 
             Spacer(Modifier.height(24.dp))
@@ -428,6 +453,44 @@ private fun CrownMark() {
                         .alpha(0.6f + sweep / 1200f)
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun HomeActionCard(
+    title: String,
+    subtitle: String,
+    icon: ImageVector,
+    accent: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    PressableSurface(
+        onClick = onClick,
+        modifier = modifier,
+        background = Arena.Surface.copy(alpha = 0.62f),
+        borderColor = accent.copy(alpha = 0.42f),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(22.dp))
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                color = Arena.TextHi,
+                fontWeight = FontWeight.W800
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = Arena.TextLow
+            )
         }
     }
 }
