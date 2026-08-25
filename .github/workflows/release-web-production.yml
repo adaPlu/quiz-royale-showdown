@@ -157,6 +157,7 @@ jobs:
     name: Guest to WebSocket STATE production smoke
     needs: pages
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     env:
       WEB_ORIGIN: https://quiz-royale-showdown.pages.dev
     steps:
