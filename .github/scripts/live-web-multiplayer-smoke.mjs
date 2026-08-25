@@ -113,6 +113,12 @@ try {
   }
 }
 
+// Node's built-in WebSocket/fetch implementations can retain idle connection
+// handles after the verified transaction is complete. Reaching this line means
+// every assertion above passed and guest cleanup finished, so terminate cleanly
+// instead of leaving the release job running indefinitely.
+process.exit(0);
+
 async function expectState({ assignment, socketTicket, guest }) {
   assert(typeof WebSocket === "function", "Node runtime does not expose WebSocket");
   const socketBase = worker.replace(/^https:/, "wss:").replace(/^http:/, "ws:");

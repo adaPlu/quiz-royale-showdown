@@ -5,7 +5,9 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: web-multiplayer-production
+  # The bounded verifier supersedes the legacy group, whose final pre-fix run
+  # can retain a Node network handle indefinitely.
+  group: web-multiplayer-production-bounded
   cancel-in-progress: false
 
 permissions:
@@ -157,6 +159,7 @@ jobs:
     name: Guest to WebSocket STATE production smoke
     needs: pages
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     env:
       WEB_ORIGIN: https://quiz-royale-showdown.pages.dev
     steps:
