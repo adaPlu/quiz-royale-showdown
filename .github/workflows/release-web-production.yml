@@ -129,8 +129,9 @@ jobs:
         run: npm ci --prefix functions
 
       - name: Deploy Pages bundle
+        working-directory: webapp
         run: >-
-          ./functions/node_modules/.bin/wrangler pages deploy webapp/dist
+          ../functions/node_modules/.bin/wrangler pages deploy dist
           --project-name "$CLOUDFLARE_PAGES_PROJECT"
           --branch "$CLOUDFLARE_PAGES_BRANCH"
           --commit-hash "${{ github.sha }}"
