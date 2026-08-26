@@ -3,7 +3,7 @@ name: Deploy Web Multiplayer Production
 on:
   push:
     branches:
-      - Railway-API-Implementation
+      - main
     paths:
       - "functions/**"
       - "webapp/**"
