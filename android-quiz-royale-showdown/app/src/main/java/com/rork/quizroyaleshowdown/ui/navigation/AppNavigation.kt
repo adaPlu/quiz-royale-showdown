@@ -82,6 +82,11 @@ fun AppNavigation() {
     // register/login on the auth screen is instantly visible on the home screen.
     val authViewModel: AuthViewModel = viewModel()
 
+    // Keep the commerce reconciler activity-scoped too. It connects to Play and
+    // queries unfinished one-time purchases as soon as a persisted registered
+    // session starts, rather than waiting for the player to reopen the Store.
+    val storeViewModel: StoreViewModel = viewModel()
+
     // Keep-alive and presence loops run only while the app is actually visible.
     // A backgrounded app must not hold a guest id alive — otherwise the 30-minute
     // idle limit would never be reached and the warning could never appear.
@@ -191,8 +196,6 @@ fun AppNavigation() {
                 }
 
                 composable(ROUTE_STORE) {
-                    val storeViewModel: StoreViewModel = viewModel()
-
                     // This destination is saved/restored by the bottom nav. Refresh
                     // whenever it becomes active so a sign-out/account switch never
                     // exposes balances or ownership from the previous session.

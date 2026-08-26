@@ -6,6 +6,7 @@ import { pool, tx, type DbClient } from "./db.js";
 type CurrencyKind = "coins" | "gems";
 type Balances = { coins: number; gems: number; seasonalTickets: number };
 type PaidProduct = { product_id: string; currency: CurrencyKind; amount: number };
+type PurchaseReceiptIdentity = { user_id: string; product_id: string };
 type CommerceUser = {
   user_id: string;
   currency_balances: unknown;
@@ -139,22 +140,18 @@ async function verifyAndGrant(request: http.IncomingMessage, user: CommerceUser)
   if (!product) return { status: 404, body: { error: "unknown_product", message: "That currency pack is not active." } };
 
   const tokenDigest = sha256(purchaseToken);
-  const existing = await pool.query<{ user_id: string }>(
-    "SELECT user_id FROM play_purchase_receipts WHERE token_digest = $1",
-    [tokenDigest],
-  );
-  if (existing.rows[0]) {
-    if (existing.rows[0].user_id !== user.user_id) {
-      return { status: 409, body: { error: "purchase_already_claimed", message: "That Play purchase belongs to another account." } };
-    }
+  const existing = await purchaseReceiptIdentity(pool, tokenDigest);
+  if (existing) {
+    const duplicate = duplicateReceiptResult(existing, user.user_id, productId);
+    if (duplicate) return duplicate;
     const fresh = await getCommerceUser(pool, user.user_id);
-    const finalized = await consumeWithGooglePlay(productId, purchaseToken);
+    const finalized = await consumeWithGooglePlay(existing.product_id, purchaseToken);
     return {
       status: 200,
       body: {
         ok: true,
         duplicate: true,
-        productId,
+        productId: existing.product_id,
         balances: normalizeBalances(fresh?.currency_balances),
         playFinalized: finalized,
       },
@@ -167,25 +164,37 @@ async function verifyAndGrant(request: http.IncomingMessage, user: CommerceUser)
   const grantedAmount = Number(product.amount) * quantity;
 
   const grant = await tx<GrantSuccess | GrantFailure>(async (client) => {
-    const seen = await client.query<{ user_id: string }>(
-      "SELECT user_id FROM play_purchase_receipts WHERE token_digest = $1 FOR UPDATE",
-      [tokenDigest],
-    );
-    if (seen.rows[0]) {
-      if (seen.rows[0].user_id !== user.user_id) {
-        return { ok: false, status: 409, body: { error: "purchase_already_claimed" } };
-      }
+    const seen = await purchaseReceiptIdentity(client, tokenDigest);
+    if (seen) {
+      const duplicate = duplicateReceiptFailure(seen, user.user_id, productId);
+      if (duplicate) return duplicate;
       const fresh = await getCommerceUser(client, user.user_id);
       return {
         ok: true,
         duplicate: true,
-        productId,
+        productId: seen.product_id,
         balances: normalizeBalances(fresh?.currency_balances),
       };
     }
 
+    // Serialize grants for one Quiz Royale account. A second verification for
+    // the same Play token that entered before the first receipt committed waits
+    // here, then re-checks the receipt before touching any currency balance.
     const locked = await getCommerceUser(client, user.user_id, true);
     if (!locked) return { ok: false, status: 404, body: { error: "user_not_found" } };
+
+    const committedWhileWaiting = await purchaseReceiptIdentity(client, tokenDigest);
+    if (committedWhileWaiting) {
+      const duplicate = duplicateReceiptFailure(committedWhileWaiting, user.user_id, productId);
+      if (duplicate) return duplicate;
+      return {
+        ok: true,
+        duplicate: true,
+        productId: committedWhileWaiting.product_id,
+        balances: normalizeBalances(locked.currency_balances),
+      };
+    }
+
     const balances = normalizeBalances(locked.currency_balances);
     const next = { ...balances, [product.currency]: balances[product.currency] + grantedAmount };
     await client.query("UPDATE users SET currency_balances = $2 WHERE user_id = $1", [user.user_id, JSON.stringify(next)]);
@@ -232,7 +241,7 @@ async function verifyAndGrant(request: http.IncomingMessage, user: CommerceUser)
   // Entitlement is committed before Play consumption. If Play is temporarily
   // unreachable, the receipt remains idempotent and a later retry will only
   // re-attempt finalization; it can never double-credit currency.
-  const finalized = await consumeWithGooglePlay(productId, purchaseToken);
+  const finalized = await consumeWithGooglePlay(grant.productId, purchaseToken);
   return {
     status: 200,
     body: { ...grant, playFinalized: finalized },
@@ -330,6 +339,37 @@ async function getCommerceUser(db: DbClient, userId: string, forUpdate = false):
     [userId],
   );
   return result.rows[0] ?? null;
+}
+
+async function purchaseReceiptIdentity(db: DbClient, tokenDigest: string): Promise<PurchaseReceiptIdentity | null> {
+  const result = await db.query<PurchaseReceiptIdentity>(
+    "SELECT user_id, product_id FROM play_purchase_receipts WHERE token_digest = $1",
+    [tokenDigest],
+  );
+  return result.rows[0] ?? null;
+}
+
+function duplicateReceiptResult(
+  receipt: PurchaseReceiptIdentity,
+  userId: string,
+  requestedProductId: string,
+): ApiResult | null {
+  if (receipt.user_id !== userId) {
+    return { status: 409, body: { error: "purchase_already_claimed", message: "That Play purchase belongs to another account." } };
+  }
+  if (receipt.product_id !== requestedProductId) {
+    return { status: 409, body: { error: "product_mismatch", message: "That Play purchase was verified for a different product." } };
+  }
+  return null;
+}
+
+function duplicateReceiptFailure(
+  receipt: PurchaseReceiptIdentity,
+  userId: string,
+  requestedProductId: string,
+): GrantFailure | null {
+  const result = duplicateReceiptResult(receipt, userId, requestedProductId);
+  return result ? { ok: false, status: result.status, body: result.body } : null;
 }
 
 function normalizeBalances(raw: unknown): Balances {
