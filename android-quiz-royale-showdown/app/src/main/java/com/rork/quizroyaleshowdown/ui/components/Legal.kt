@@ -17,31 +17,26 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
-import com.rork.quizroyaleshowdown.data.Backend
 import com.rork.quizroyaleshowdown.ui.theme.Arena
 
 private const val TAG = "Legal"
 
 /**
- * Canonical locations of the legal documents.
+ * Public legal-document URLs used by the Android release.
  *
- * Privacy and Terms are served by our own Worker (see `functions/legal.ts`) so
- * they live at a stable, crawlable URL that Google Play and App Store Review can
- * both reach. The EULA points at Apple's canonical Standard EULA rather than a
- * copy of it, because Apple requires the real document.
+ * Keep these on the canonical Pages origin until quizroyale.gg is registered
+ * and delegated. Unlike the game API, legal URLs must remain reachable from a
+ * logged-out browser and by app-store crawlers.
  */
-object LegalLinks {
-    val privacyPolicy: String get() = "${Backend.baseUrl}/legal/privacy"
-    val termsAndConditions: String get() = "${Backend.baseUrl}/legal/terms"
+object LegalDocumentUrls {
+    const val PRIVACY_POLICY = "https://quiz-royale-showdown.pages.dev/privacy-policy/"
+    const val TERMS_AND_CONDITIONS = "https://quiz-royale-showdown.pages.dev/terms/"
 
     /** Apple's Licensed Application End User License Agreement. */
-    const val EULA: String = "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/"
+    const val EULA = "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/"
 }
 
-/**
- * Opens a legal document in the user's browser. Failing to resolve a browser is
- * survivable — it must never crash the screen the link sits on.
- */
+/** Opens a legal document without crashing if no browser can resolve the URL. */
 private fun openUrl(context: android.content.Context, url: String) {
     try {
         context.startActivity(
@@ -52,16 +47,7 @@ private fun openUrl(context: android.content.Context, url: String) {
     }
 }
 
-/**
- * The standard legal footer: Privacy Policy, Terms, and EULA.
- *
- * This is the single component every surface that needs legal links should use —
- * registration, profile, and any future paywall — so the wording and the URLs can
- * never drift between screens.
- *
- * @param prefix optional lead-in sentence, e.g. the consent line shown above a
- *   registration button. Pass null on screens where the links stand alone.
- */
+/** Shared legal footer for registration, profile, and commerce surfaces. */
 @Composable
 fun LegalLinks(
     modifier: Modifier = Modifier,
@@ -87,20 +73,18 @@ fun LegalLinks(
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        LegalLink("Privacy Policy") { openUrl(context, LegalLinks.privacyPolicy) }
+        LegalLink("Privacy Policy") { openUrl(context, LegalDocumentUrls.PRIVACY_POLICY) }
         Separator()
-        LegalLink("Terms") { openUrl(context, LegalLinks.termsAndConditions) }
+        LegalLink("Terms") { openUrl(context, LegalDocumentUrls.TERMS_AND_CONDITIONS) }
         if (includeEula) {
             Separator()
-            LegalLink("EULA") { openUrl(context, LegalLinks.EULA) }
+            LegalLink("EULA") { openUrl(context, LegalDocumentUrls.EULA) }
         }
     }
 }
 
 @Composable
 private fun LegalLink(label: String, onClick: () -> Unit) {
-    // A plain tappable Text rather than a button: these are references, and
-    // styling them as buttons would compete with the real call to action.
     PressableSurface(
         onClick = onClick,
         background = androidx.compose.ui.graphics.Color.Transparent,

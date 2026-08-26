@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,6 +26,14 @@ class StoreViewModel(app: Application) : AndroidViewModel(app) {
     private val prefs = PlayerPrefs(app)
     private val billing = GooglePlayBillingManager(app, prefs)
 
+    /**
+     * One key per in-flight logical virtual-item purchase. A transport failure
+     * intentionally keeps the key so a retry cannot double-charge a repeatable
+     * item if the server committed the first request before the response was lost.
+     */
+    private val pendingPurchaseKeys = mutableMapOf<String, String>()
+    private var lastSessionToken: String? = null
+
     private val _uiState = MutableStateFlow(StoreUiState())
     val uiState: StateFlow<StoreUiState> = _uiState.asStateFlow()
     val billingState: StateFlow<BillingStoreState> = billing.state
@@ -41,10 +50,15 @@ class StoreViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun refreshStoreData() {
         val token = prefs.sessionToken
+        if (token != lastSessionToken) {
+            pendingPurchaseKeys.clear()
+            lastSessionToken = token
+        }
         if (token == null) {
-            _uiState.update {
-                it.copy(loading = false, error = "Register or sign in to use the store.")
-            }
+            _uiState.value = StoreUiState(
+                loading = false,
+                error = "Register or sign in to use the store."
+            )
             return
         }
         viewModelScope.launch {
@@ -70,17 +84,27 @@ class StoreViewModel(app: Application) : AndroidViewModel(app) {
     fun purchase(item: StoreItem) {
         val token = prefs.sessionToken ?: return
         if (_uiState.value.busyItemId != null) return
+        val idempotencyKey = pendingPurchaseKeys.getOrPut(item.itemId) {
+            UUID.randomUUID().toString()
+        }
         viewModelScope.launch {
             _uiState.update { it.copy(busyItemId = item.itemId, error = null, notice = null) }
-            when (val outcome = api.purchaseStoreItem(token, item.itemId)) {
-                is AuthOutcome.Ok -> _uiState.update {
-                    it.copy(
-                        busyItemId = null,
-                        balances = outcome.value.balances,
-                        items = outcome.value.items,
-                        cosmetics = outcome.value.cosmetics,
-                        notice = if (outcome.value.duplicate) "Purchase already applied." else "Purchased ${item.displayName}."
-                    )
+            when (val outcome = api.purchaseStoreItem(token, item.itemId, idempotencyKey)) {
+                is AuthOutcome.Ok -> {
+                    pendingPurchaseKeys.remove(item.itemId)
+                    _uiState.update {
+                        it.copy(
+                            busyItemId = null,
+                            balances = outcome.value.balances,
+                            items = outcome.value.items,
+                            cosmetics = outcome.value.cosmetics,
+                            notice = if (outcome.value.duplicate) {
+                                "Purchase already applied."
+                            } else {
+                                "Purchased ${item.displayName}."
+                            }
+                        )
+                    }
                 }
 
                 is AuthOutcome.Invalid -> _uiState.update {
@@ -129,8 +153,9 @@ class StoreViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
-        super.onCleared()
+        pendingPurchaseKeys.clear()
         billing.shutdown()
         api.shutdown()
+        super.onCleared()
     }
 }

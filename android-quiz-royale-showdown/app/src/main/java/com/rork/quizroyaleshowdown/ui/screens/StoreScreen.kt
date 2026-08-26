@@ -48,12 +48,15 @@ import com.rork.quizroyaleshowdown.data.StoreViewModel
 import com.rork.quizroyaleshowdown.data.VirtualCurrencyBalances
 import com.rork.quizroyaleshowdown.ui.components.ArenaBackground
 import com.rork.quizroyaleshowdown.ui.components.ArenaOutlineButton
+import com.rork.quizroyaleshowdown.ui.components.LegalLinks
 import com.rork.quizroyaleshowdown.ui.components.PressableSurface
 import com.rork.quizroyaleshowdown.ui.components.StatBlock
 import com.rork.quizroyaleshowdown.ui.components.TagChip
 import com.rork.quizroyaleshowdown.ui.theme.Arena
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+
+private const val AUTH_REQUIRED_MESSAGE = "Register or sign in to use the store."
 
 @Composable
 fun StoreScreen(
@@ -84,10 +87,17 @@ fun StoreScreen(
                 return@Column
             }
 
-            state.error?.let {
-                MessageCard(text = it, accent = Arena.Magenta)
+            state.error?.let { error ->
+                val requiresAuth = error == AUTH_REQUIRED_MESSAGE
+                MessageCard(text = error, accent = Arena.Magenta)
                 Spacer(Modifier.height(12.dp))
-                ArenaOutlineButton(text = "Register or sign in", accent = Arena.Gold, onClick = onRegister)
+                ArenaOutlineButton(
+                    text = if (requiresAuth) "Register or sign in" else "Retry store",
+                    accent = Arena.Gold,
+                    onClick = {
+                        if (requiresAuth) onRegister() else viewModel.refresh()
+                    }
+                )
                 return@Column
             }
 
@@ -176,6 +186,11 @@ fun StoreScreen(
                     )
                 }
             }
+
+            Spacer(Modifier.height(28.dp))
+            LegalLinks(
+                prefix = "Google Play handles payment processing. Review the purchase and privacy terms before buying."
+            )
         }
     }
 }

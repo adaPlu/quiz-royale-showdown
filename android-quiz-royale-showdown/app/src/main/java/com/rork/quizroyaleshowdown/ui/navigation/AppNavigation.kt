@@ -192,6 +192,17 @@ fun AppNavigation() {
 
                 composable(ROUTE_STORE) {
                     val storeViewModel: StoreViewModel = viewModel()
+
+                    // This destination is saved/restored by the bottom nav. Refresh
+                    // whenever it becomes active so a sign-out/account switch never
+                    // exposes balances or ownership from the previous session.
+                    // Refresh global identity after leaving because a store purchase
+                    // can change power-up charges and server-side entitlements.
+                    LifecycleResumeEffect(storeViewModel) {
+                        storeViewModel.refresh()
+                        onPauseOrDispose { authViewModel.refresh() }
+                    }
+
                     StoreScreen(
                         viewModel = storeViewModel,
                         onBack = { navController.popBackStack() },
