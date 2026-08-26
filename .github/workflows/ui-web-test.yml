@@ -3,9 +3,11 @@ name: UI and Web Test
 on:
   push:
     branches:
+      - main
       - UITest
   pull_request:
     branches:
+      - main
       - Railway-API-Implementation
   workflow_dispatch:
 
