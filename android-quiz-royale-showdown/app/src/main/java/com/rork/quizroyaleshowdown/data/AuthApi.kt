@@ -20,7 +20,6 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import java.io.IOException
-import java.util.UUID
 
 private const val TAG = "AuthApi"
 
@@ -293,19 +292,27 @@ class AuthApi {
         null
     }
 
-    suspend fun purchaseStoreItem(token: String, itemId: String): AuthOutcome<StorePurchaseResult> =
-        runOutcomeCall {
-            http.post("$base/store/purchase") {
-                header("Authorization", "Bearer $token")
-                contentType(ContentType.Application.Json)
-                setBody(
-                    buildJsonObject {
-                        put("itemId", JsonPrimitive(itemId))
-                        put("idempotencyKey", JsonPrimitive(UUID.randomUUID().toString()))
-                    }
-                )
-            }
+    /**
+     * Performs one virtual-currency store transaction using a caller-owned key.
+     * The same logical retry must reuse [idempotencyKey] so a committed response
+     * lost in transit cannot charge and grant a repeatable item twice.
+     */
+    suspend fun purchaseStoreItem(
+        token: String,
+        itemId: String,
+        idempotencyKey: String
+    ): AuthOutcome<StorePurchaseResult> = runOutcomeCall {
+        http.post("$base/store/purchase") {
+            header("Authorization", "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody(
+                buildJsonObject {
+                    put("itemId", JsonPrimitive(itemId))
+                    put("idempotencyKey", JsonPrimitive(idempotencyKey))
+                }
+            )
         }
+    }
 
     suspend fun cosmetics(token: String): List<CosmeticItem>? = runCatching {
         val response = http.get("$base/cosmetics") { header("Authorization", "Bearer $token") }
