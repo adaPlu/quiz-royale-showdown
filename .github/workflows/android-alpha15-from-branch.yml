@@ -1,4 +1,4 @@
-name: Android Alpha 1.5 Fresh Build
+name: Android Alpha 1.6 Fresh Build
 
 on:
   push:
@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   build:
-    name: Fresh Gradle Alpha 1.5 code 5
+    name: Fresh Gradle Alpha 1.6 code 1787428685
     runs-on: ubuntu-latest
     env:
       EXPO_PUBLIC_RAILWAY_API_URL: https://railway-api-production-5772.up.railway.app
@@ -27,7 +27,7 @@ jobs:
       - name: Checkout 1.5 source branch
         uses: actions/checkout@v4
         with:
-          ref: build-alpha-1.5-code5
+          ref: build-alpha-1.6-code1787428685
 
       - uses: actions/setup-java@v5
         with:
@@ -38,8 +38,8 @@ jobs:
 
       - name: Verify version
         run: |
-          grep 'versionCode = 5' app/build.gradle.kts
-          grep 'versionName = "1.5"' app/build.gradle.kts
+          grep 'versionCode = 1787428685' app/build.gradle.kts
+          grep 'versionName = "1.6"' app/build.gradle.kts
 
       - name: Run unit tests
         run: ./gradlew :app:testDebugUnitTest --stacktrace
@@ -52,13 +52,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-artifacts
-          cp app/build/outputs/bundle/release/app-release.aab release-artifacts/QuizRoyaleShowdown-v1.5-code5-fresh-unsigned.aab
+          cp app/build/outputs/bundle/release/app-release.aab release-artifacts/QuizRoyaleShowdown-v1.6-code1787428685-fresh-unsigned.aab
           sha256sum release-artifacts/* > release-artifacts/SHA256SUMS.txt
 
       - name: Upload fresh AAB
         uses: actions/upload-artifact@v4
         with:
-          name: quiz-royale-v1.5-code5-fresh
+          name: quiz-royale-v1.6-code1787428685-fresh
           path: android-quiz-royale-showdown/release-artifacts/*
           if-no-files-found: error
           retention-days: 14
