@@ -65,3 +65,5 @@ jobs:
           path: android-quiz-royale-showdown/release-artifacts/*
           if-no-files-found: error
           retention-days: 14
+
+# Rebuild requested after matchmaking crash report.
