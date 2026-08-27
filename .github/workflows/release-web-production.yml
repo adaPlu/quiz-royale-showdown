@@ -20,7 +20,7 @@ env:
   RAILWAY_API_URL: https://railway-api-production-5772.up.railway.app
   MATCH_API_URL: https://quiz-royale-functions.adapluguez.workers.dev
   CLOUDFLARE_PAGES_PROJECT: quiz-royale-showdown
-  CLOUDFLARE_PAGES_BRANCH: Railway-API-Implementation
+  CLOUDFLARE_PAGES_BRANCH: main
 
 jobs:
   worker:
