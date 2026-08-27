@@ -1,0 +1,64 @@
+name: Android Alpha 1.5 Fresh Build
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/android-alpha15-from-branch.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Fresh Gradle Alpha 1.5 code 5
+    runs-on: ubuntu-latest
+    env:
+      EXPO_PUBLIC_RAILWAY_API_URL: https://railway-api-production-5772.up.railway.app
+      EXPO_PUBLIC_RORK_FUNCTIONS_URL: https://quiz-royale-functions.adapluguez.workers.dev
+
+    defaults:
+      run:
+        working-directory: android-quiz-royale-showdown
+
+    steps:
+      - name: Checkout 1.5 source branch
+        uses: actions/checkout@v4
+        with:
+          ref: build-alpha-1.5-code5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Verify version
+        run: |
+          grep 'versionCode = 5' app/build.gradle.kts
+          grep 'versionName = "1.5"' app/build.gradle.kts
+
+      - name: Run unit tests
+        run: ./gradlew :app:testDebugUnitTest --stacktrace
+
+      - name: Fresh bundleRelease
+        run: ./gradlew clean :app:bundleRelease --stacktrace
+
+      - name: Collect AAB
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifacts
+          cp app/build/outputs/bundle/release/app-release.aab release-artifacts/QuizRoyaleShowdown-v1.5-code5-fresh-unsigned.aab
+          sha256sum release-artifacts/* > release-artifacts/SHA256SUMS.txt
+
+      - name: Upload fresh AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: quiz-royale-v1.5-code5-fresh
+          path: android-quiz-royale-showdown/release-artifacts/*
+          if-no-files-found: error
+          retention-days: 14
