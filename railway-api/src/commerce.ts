@@ -60,7 +60,10 @@ export async function handleCommerceRequest(
   response: http.ServerResponse,
 ): Promise<boolean> {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
-  const isCommerceRoute = url.pathname === "/store/currency-packs" || url.pathname === "/store/google-play/verify";
+  const isCommerceRoute =
+    url.pathname === "/store/currency-packs" ||
+    url.pathname === "/store/google-play/verify" ||
+    url.pathname === "/store/billing-status";
   if (!isCommerceRoute) return false;
 
   const origin = typeof request.headers.origin === "string" ? request.headers.origin.trim().replace(/\/$/, "") : "";
@@ -81,6 +84,13 @@ export async function handleCommerceRequest(
   }
 
   try {
+    if (request.method === "GET" && url.pathname === "/store/billing-status") {
+      return finish(response, {
+        status: 200,
+        body: billingStatus(),
+      });
+    }
+
     if (request.method === "GET" && url.pathname === "/store/currency-packs") {
       const user = await authenticate(request);
       if (!user) return finish(response, { status: 401, body: { error: "unauthorized" } });
@@ -451,6 +461,56 @@ function parseServiceAccountSource(source: string): ServiceAccount | null {
     });
     return null;
   }
+}
+
+function billingStatus(): Record<string, unknown> {
+  const raw = process.env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON?.trim();
+  const encoded = process.env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64?.trim();
+
+  let base64DecodedLength = 0;
+  let base64JsonValid = false;
+  let base64HasClientEmail = false;
+  let base64HasPrivateKey = false;
+  let base64ProjectId: string | null = null;
+  let base64Type: string | null = null;
+
+  if (encoded) {
+    try {
+      const normalized = encoded.replace(/\s+/g, "");
+      const decoded = Buffer.from(normalized, "base64").toString("utf8");
+      base64DecodedLength = decoded.length;
+      const parsed = JSON.parse(decoded.replace(/^\uFEFF/, "").trim()) as Record<string, unknown>;
+      base64JsonValid = true;
+      base64HasClientEmail = typeof parsed.client_email === "string" && parsed.client_email.length > 0;
+      base64HasPrivateKey = typeof parsed.private_key === "string" && parsed.private_key.length > 0;
+      base64ProjectId = typeof parsed.project_id === "string" ? parsed.project_id : null;
+      base64Type = typeof parsed.type === "string" ? parsed.type : null;
+    } catch {
+      // Safe diagnostics only; never expose credential contents.
+    }
+  }
+
+  return {
+    service: "quiz-royale-api",
+    billingProvider: "google_play",
+    packageName: PACKAGE_NAME,
+    configured: Boolean(serviceAccount()),
+    credentialEnv: {
+      base64Present: Boolean(encoded),
+      base64Length: encoded?.length ?? 0,
+      rawJsonPresent: Boolean(raw),
+      rawJsonLength: raw?.length ?? 0,
+    },
+    base64Inspection: {
+      decodedLength: base64DecodedLength,
+      jsonValid: base64JsonValid,
+      hasClientEmail: base64HasClientEmail,
+      hasPrivateKey: base64HasPrivateKey,
+      projectId: base64ProjectId,
+      type: base64Type,
+    },
+    deployCommit: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 12) ?? null,
+  };
 }
 
 async function googleAccessToken(credentials: ServiceAccount): Promise<string> {
