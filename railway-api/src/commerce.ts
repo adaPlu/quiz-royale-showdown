@@ -393,17 +393,62 @@ function accountBinding(userId: string): string {
 function serviceAccount(): ServiceAccount | null {
   const raw = process.env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON?.trim();
   const encoded = process.env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64?.trim();
-  const source = raw || (encoded ? Buffer.from(encoded, "base64").toString("utf8") : "");
-  if (!source) return null;
+
+  // Prefer Base64 on Railway so JSON quoting/newlines cannot corrupt the
+  // credential. If one configured source is malformed, try the other instead
+  // of allowing a stale variable to mask a valid one.
+  if (encoded) {
+    try {
+      const normalized = encoded.replace(/\s+/g, "");
+      const decoded = Buffer.from(normalized, "base64").toString("utf8");
+      const parsed = parseServiceAccountSource(decoded);
+      if (parsed) return parsed;
+      console.warn("Google Play service account Base64 decoded but lacked required fields", {
+        encodedLength: encoded.length,
+        decodedLength: decoded.length,
+      });
+    } catch (error) {
+      console.warn("Google Play service account Base64 could not be decoded", {
+        encodedLength: encoded.length,
+        error: (error as Error)?.message,
+      });
+    }
+  }
+
+  if (raw) {
+    const parsed = parseServiceAccountSource(raw);
+    if (parsed) return parsed;
+    console.warn("Google Play service account JSON lacked required fields", {
+      rawLength: raw.length,
+    });
+  }
+
+  console.warn("Google Play service account is unavailable", {
+    base64Present: Boolean(encoded),
+    base64Length: encoded?.length ?? 0,
+    rawPresent: Boolean(raw),
+    rawLength: raw?.length ?? 0,
+  });
+  return null;
+}
+
+function parseServiceAccountSource(source: string): ServiceAccount | null {
   try {
-    const parsed = JSON.parse(source) as Partial<ServiceAccount>;
+    // Some downloaded JSON files include a UTF-8 BOM. Node's JSON.parse does
+    // not accept it, so strip it before parsing.
+    const cleaned = source.replace(/^\uFEFF/, "").trim();
+    const parsed = JSON.parse(cleaned) as Partial<ServiceAccount>;
     if (!parsed.client_email || !parsed.private_key) return null;
     return {
       client_email: parsed.client_email,
       private_key: parsed.private_key.replace(/\\n/g, "\n"),
       token_uri: parsed.token_uri,
     };
-  } catch {
+  } catch (error) {
+    console.warn("Google Play service account JSON could not be parsed", {
+      sourceLength: source.length,
+      error: (error as Error)?.message,
+    });
     return null;
   }
 }
