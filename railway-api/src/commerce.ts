@@ -124,6 +124,9 @@ export async function reconcileVoidedPurchases(now = Date.now()): Promise<Record
       `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${encodeURIComponent(PACKAGE_NAME)}/purchases/voidedpurchases`,
     );
     endpoint.searchParams.set("startTime", String(Math.max(0, now - VOIDED_LOOKBACK_MS)));
+    endpoint.searchParams.set("endTime", String(now));
+    endpoint.searchParams.set("type", "0");
+    endpoint.searchParams.set("includeQuantityBasedPartialRefund", "true");
     endpoint.searchParams.set("maxResults", "1000");
     if (pageToken) endpoint.searchParams.set("token", pageToken);
 
