@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { explicitReviewPassword, postgresConnectionConfig, postgresSslConfig } from "./runtime-config.js";
 
-test("explicitReviewPassword requires an explicit nonblank password", () => {
+test("explicitReviewPassword requires a strong non-placeholder password", () => {
   assert.equal(explicitReviewPassword({}), null);
   assert.equal(explicitReviewPassword({ GOOGLE_PLAY_REVIEW_PASSWORD: "   " }), null);
-  assert.equal(explicitReviewPassword({ GOOGLE_PLAY_REVIEW_PASSWORD: " Test?Test " }), "Test?Test");
+  assert.equal(explicitReviewPassword({ GOOGLE_PLAY_REVIEW_PASSWORD: " Test?Test " }), null);
+  assert.equal(explicitReviewPassword({ GOOGLE_PLAY_REVIEW_PASSWORD: "shortPass9" }), null);
+  assert.equal(explicitReviewPassword({ GOOGLE_PLAY_REVIEW_PASSWORD: "Reviewer-Only-2026-Strong" }), "Reviewer-Only-2026-Strong");
 });
 
 test("postgresSslConfig verifies certificates by default", () => {
