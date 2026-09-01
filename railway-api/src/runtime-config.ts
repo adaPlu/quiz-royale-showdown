@@ -1,6 +1,9 @@
 export function explicitReviewPassword(env: NodeJS.ProcessEnv = process.env): string | null {
   const password = env.GOOGLE_PLAY_REVIEW_PASSWORD?.trim();
-  return password ? password : null;
+  if (!password) return null;
+  const blocked = new Set(["Test?Test", "test?test", "password", "password1", "quizroyale"]);
+  if (blocked.has(password) || password.length < 12) return null;
+  return password;
 }
 
 export function postgresSslConfig(
