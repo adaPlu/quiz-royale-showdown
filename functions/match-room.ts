@@ -576,8 +576,10 @@ export class MatchRoom extends DurableObject<Env> {
         correctAnswers: p.correctCount,
         powerUpsUsed: p.spentPowerUps.length,
         categoryPoints: p.categoryPoints,
-        // Practice is a solo drill — points count, win/loss does not.
+        // Practice is a solo drill. It must not mint persistent points,
+        // leaderboard progress, power-up charges, currency, or season rewards.
         recordWinLoss: state.mode !== "PRACTICE",
+        competitiveRewards: state.mode !== "PRACTICE",
       });
     }
     return outcomes;
