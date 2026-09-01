@@ -139,6 +139,8 @@ export type MatchOutcome = {
   powerUpsUsed: number;
   categoryPoints: Record<string, number>;
   recordWinLoss: boolean;
+  /** Optional for compatibility with older workers; false for Practice. */
+  competitiveRewards?: boolean;
 };
 
 export function applyOutcome(rawBase: PlayerStats, outcome: MatchOutcome): PlayerStats {
@@ -150,6 +152,8 @@ export function applyOutcome(rawBase: PlayerStats, outcome: MatchOutcome): Playe
 
   const placements = [base.bestPlacement, outcome.placement].filter((p): p is number => p !== null);
   const counted = outcome.recordWinLoss;
+  const competitive = outcome.competitiveRewards ?? counted;
+  if (!competitive) return base;
 
   return {
     wins: base.wins + (counted && outcome.won ? 1 : 0),
