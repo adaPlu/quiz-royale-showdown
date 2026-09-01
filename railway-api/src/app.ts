@@ -1,6 +1,6 @@
 import http from "node:http";
 import { closeCache } from "./cache.js";
-import { handleCommerceRequest } from "./commerce.js";
+import { handleCommerceRequest, startGooglePlayVoidedPurchaseReconciler } from "./commerce.js";
 import { pool } from "./db.js";
 import { handleRequest } from "./server.js";
 
@@ -11,11 +11,14 @@ export const appServer = http.createServer(async (request, response) => {
   await handleRequest(request, response);
 });
 
+const stopVoidedPurchaseReconciler = startGooglePlayVoidedPurchaseReconciler();
+
 appServer.listen(PORT, () => {
   console.log(`quiz-royale-api listening on ${PORT}`);
 });
 
 process.on("SIGTERM", () => {
+  stopVoidedPurchaseReconciler();
   appServer.close(() => {
     Promise.all([pool.end(), closeCache()]).finally(() => process.exit(0));
   });

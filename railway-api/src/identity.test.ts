@@ -24,6 +24,41 @@ test("match outcomes update shared user and guest stat shape", () => {
   assert.equal(next.categoryPoints.Science, 80);
 });
 
+
+test("Practice outcomes do not mutate persistent competitive progression", () => {
+  const base = {
+    ...emptyStats(),
+    wins: 3,
+    losses: 2,
+    matchesPlayed: 5,
+    totalPoints: 900,
+    bestScore: 400,
+    bestPlacement: 1,
+    correctAnswers: 30,
+    powerUpsUsed: 2,
+    powerUpCharges: 7,
+    categoryPoints: { Science: 500 },
+    bestRank: 12,
+  };
+
+  const next = applyOutcome(base, {
+    matchId: "practice-1",
+    subjectKind: "USER",
+    subjectId: "u-1",
+    displayName: "Alice",
+    won: true,
+    placement: 1,
+    score: 9999,
+    correctAnswers: 10,
+    powerUpsUsed: 2,
+    categoryPoints: { Science: 9999 },
+    recordWinLoss: false,
+    competitiveRewards: false,
+  });
+
+  assert.deepEqual(next, base);
+});
+
 test("guest transfer merges stats exactly once into registered stats", () => {
   const guest = applyOutcome(emptyStats(), {
     matchId: "match-2",

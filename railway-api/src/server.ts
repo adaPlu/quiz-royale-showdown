@@ -199,6 +199,7 @@ const matchOutcomeSchema = z.object({
   powerUpsUsed: z.number().int().nonnegative().max(100),
   categoryPoints: z.record(z.number().int().nonnegative().max(1_000_000)),
   recordWinLoss: z.boolean(),
+  competitiveRewards: z.boolean().optional(),
 });
 
 export function createQuizRoyaleApiServer(): http.Server {
@@ -239,7 +240,7 @@ export async function handleRequest(request: http.IncomingMessage, response: htt
     if (request.method === "POST" && url.pathname === "/internal/guest/claim") return sendResponse(response, await claimGuest(request));
 
     if (request.method === "GET" && url.pathname === "/friends") return sendResponse(response, await listFriends(request));
-    if (request.method === "POST" && url.pathname === "/friends/add") return sendResponse(response, await addFriend(request));
+    if (request.method === "POST" && url.pathname === "/friends/add") return sendResponse(response, await sendFriendInvite(request));
     if (request.method === "POST" && url.pathname === "/friends/remove") return sendResponse(response, await removeFriend(request));
     if (request.method === "GET" && url.pathname === "/friends/invites") return sendResponse(response, await listFriendInvites(request));
     if (request.method === "POST" && url.pathname === "/friends/invites") return sendResponse(response, await sendFriendInvite(request));
@@ -381,7 +382,13 @@ async function login(request: http.IncomingMessage): Promise<ApiResponse> {
   }
 
   if (isReviewAccountIdentifier(identifier)) {
-    await ensureGooglePlayReviewAccount();
+    const reviewer = await ensureGooglePlayReviewAccount();
+    if (!reviewer) {
+      return [503, {
+        error: "reviewer_access_not_configured",
+        message: "The Play review account is not configured."
+      }];
+    }
   }
 
   const record = await findUserByIdentifier(pool, identifier);
@@ -813,7 +820,8 @@ async function currentSeason(request: http.IncomingMessage): Promise<ApiResponse
   const season = await getActiveSeason(pool);
   if (!season) return [404, { error: "not_found", message: "No active season is configured." }];
   const progress = await getSeasonProgress(pool, record.user_id, season.season_id);
-  return [200, { season: seasonDto(season), progress }];
+  const hasPass = await hasSeasonPass(pool, record.user_id, season.season_id, record.entitlements);
+  return [200, { season: seasonDto(season), progress, hasSeasonPass: hasPass }];
 }
 
 async function storeItems(request: http.IncomingMessage): Promise<ApiResponse> {
@@ -860,8 +868,12 @@ async function purchaseStoreItem(request: http.IncomingMessage): Promise<ApiResp
         return { status: 409 as const, body: { error: "already_owned", message: "You already own this cosmetic." } };
       }
     }
-    if (item.item_type === "SEASON_PASS" && entitlements.seasonPassAccess) {
-      return { status: 409 as const, body: { error: "already_owned", message: "You already have season pass access." } };
+    if (item.item_type === "SEASON_PASS") {
+      const seasonId = storePayloadString(item.payload, "seasonId");
+      if (!seasonId) return { status: 409 as const, body: { error: "invalid_item", message: "This season pass is misconfigured." } };
+      if (await hasSeasonPass(client, user.user_id, seasonId, user.entitlements)) {
+        return { status: 409 as const, body: { error: "already_owned", message: "You already own this season pass." } };
+      }
     }
 
     if (!entitlements.unlimitedCurrency && item.price > 0) {
@@ -1047,13 +1059,20 @@ async function applyMatchOutcome(client: DbClient, outcome: MatchOutcome): Promi
   );
   if (claim.rowCount === 0) return { duplicate: true, stats: null };
 
+  // Older workers did not send competitiveRewards. recordWinLoss was already
+  // false for Practice, so it is the safe compatibility fallback.
+  const competitive = outcome.competitiveRewards ?? outcome.recordWinLoss;
+
   if (outcome.subjectKind === "GUEST") {
     const guest = await getGuest(client, outcome.subjectId, true);
     if (!guest || Number(guest.expires_at) <= Date.now()) return null;
     const now = Date.now();
     const expiresAt = now + GUEST_TTL_MS;
-    const stats = applyOutcome(await getStats(client, "GUEST", outcome.subjectId), outcome);
     await client.query("UPDATE guests SET last_seen_at = $2, expires_at = $3 WHERE guest_id = $1", [outcome.subjectId, now, expiresAt]);
+    const base = await getStats(client, "GUEST", outcome.subjectId);
+    if (!competitive) return { duplicate: false, stats: base };
+
+    const stats = applyOutcome(base, outcome);
     await putStats(client, "GUEST", outcome.subjectId, guest.display_name, stats, expiresAt);
     const rank = await syncLeaderboard(client, "GUEST", outcome.subjectId, guest.display_name, stats, expiresAt);
     const ranked = applyRank(stats, rank);
@@ -1064,7 +1083,10 @@ async function applyMatchOutcome(client: DbClient, outcome: MatchOutcome): Promi
 
   const user = await getUserForUpdate(client, outcome.subjectId);
   if (!user) return null;
-  const stats = applyOutcome(await getStats(client, "USER", outcome.subjectId), outcome);
+  const base = await getStats(client, "USER", outcome.subjectId);
+  if (!competitive) return { duplicate: false, stats: base };
+
+  const stats = applyOutcome(base, outcome);
   await putStats(client, "USER", outcome.subjectId, user.username, stats, null);
   await awardCurrencyForMatch(client, user, outcome);
   await awardSeasonProgressForMatch(client, user, outcome);
@@ -1406,6 +1428,22 @@ async function awardCurrencyForMatch(client: DbClient, user: UserRow, outcome: M
   }
 }
 
+async function hasSeasonPass(
+  db: DbClient,
+  userId: string,
+  seasonId: string,
+  rawEntitlements: unknown,
+): Promise<boolean> {
+  // Reviewer/premium operational accounts retain global access. Player season
+  // passes are otherwise scoped by season_id in user_season_passes.
+  if (normalizeEntitlements(rawEntitlements).premiumAccess) return true;
+  const result = await db.query(
+    "SELECT 1 FROM user_season_passes WHERE user_id = $1 AND season_id = $2",
+    [userId, seasonId],
+  );
+  return Boolean(result.rowCount);
+}
+
 async function hydrateStoreItems(db: DbClient, record: UserRow): Promise<StoreItemDto[]> {
   const rows = await db.query<StoreItemRow>(
     `SELECT item_id, item_type, display_name, description, currency, price, payload
@@ -1415,9 +1453,15 @@ async function hydrateStoreItems(db: DbClient, record: UserRow): Promise<StoreIt
   );
   const entitlements = normalizeEntitlements(record.entitlements);
   const ownedCosmetics = await ownedCosmeticIds(db, record.user_id);
-  return rows.rows.map((row) => {
+  return Promise.all(rows.rows.map(async (row) => {
     const payload = row.payload ?? {};
     const cosmeticId = storePayloadString(payload, "cosmeticId");
+    const seasonId = storePayloadString(payload, "seasonId");
+    const owned = row.item_type === "COSMETIC"
+      ? Boolean(cosmeticId && (ownedCosmetics.has(cosmeticId) || entitlements.allStoreItemsUnlocked))
+      : row.item_type === "SEASON_PASS"
+        ? Boolean(seasonId && await hasSeasonPass(db, record.user_id, seasonId, record.entitlements))
+        : false;
     return {
       itemId: row.item_id,
       itemType: row.item_type,
@@ -1426,11 +1470,9 @@ async function hydrateStoreItems(db: DbClient, record: UserRow): Promise<StoreIt
       currency: row.currency,
       price: Number(row.price),
       payload,
-      owned: row.item_type === "COSMETIC"
-        ? Boolean(cosmeticId && (ownedCosmetics.has(cosmeticId) || entitlements.allStoreItemsUnlocked))
-        : row.item_type === "SEASON_PASS" && entitlements.seasonPassAccess,
+      owned,
     };
-  });
+  }));
 }
 
 async function getStoreItem(db: DbClient, itemId: string): Promise<StoreItemRow | null> {
@@ -1478,9 +1520,14 @@ async function grantStoreItem(client: DbClient, user: UserRow, item: StoreItemRo
   }
 
   if (item.item_type === "SEASON_PASS") {
-    const entitlements = { ...normalizeEntitlements(user.entitlements), seasonPassAccess: true };
-    await client.query("UPDATE users SET entitlements = $2 WHERE user_id = $1", [user.user_id, JSON.stringify(entitlements)]);
-    user.entitlements = entitlements;
+    const seasonId = storePayloadString(item.payload, "seasonId");
+    if (!seasonId) throw new Error(`store item ${item.item_id} missing seasonId`);
+    await client.query(
+      `INSERT INTO user_season_passes(user_id, season_id, acquired_at, source)
+       VALUES ($1, $2, $3, 'store')
+       ON CONFLICT (user_id, season_id) DO NOTHING`,
+      [user.user_id, seasonId, Date.now()],
+    );
   }
 }
 

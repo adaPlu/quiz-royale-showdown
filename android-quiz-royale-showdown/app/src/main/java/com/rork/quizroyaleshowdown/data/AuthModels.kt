@@ -121,7 +121,8 @@ data class SeasonProgress(
 @Serializable
 data class CurrentSeasonEnvelope(
     val season: Season,
-    val progress: SeasonProgress
+    val progress: SeasonProgress,
+    val hasSeasonPass: Boolean = false
 )
 
 @Serializable

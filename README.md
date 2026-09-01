@@ -12,7 +12,7 @@ The current application consists of:
 - Cloudflare Workers + Durable Objects for low-latency matchmaking and live WebSocket game rooms;
 - Google Play Billing for optional Android coin and gem purchases.
 
-The primary integration branch is `Railway-API-Implementation`.
+The canonical integration and production source branch is `main`.
 
 ---
 
@@ -32,8 +32,8 @@ A custom production web origin may also be deployed through the prepared Cloudfl
 
 ```text
 applicationId: com.rork.quizroyaleshowdown
-versionName:   1.3
-versionCode:   3
+versionName:   1.7
+versionCode:   1787428686
 minSdk:        26
 targetSdk:     36
 compileSdk:    36
@@ -512,7 +512,7 @@ Using the project-local Wrangler dependency through `npx` is also supported.
 ```bash
 git clone https://github.com/adaPlu/quiz-royale-showdown.git
 cd quiz-royale-showdown
-git switch Railway-API-Implementation
+git switch main
 ```
 
 If your existing clone still references the former repository name, update it with:
@@ -839,26 +839,28 @@ Security-sensitive operations follow several project rules:
 
 # Branch Strategy
 
-The active integration branch is:
+The canonical integration branch is:
 
 ```text
-Railway-API-Implementation
+main
 ```
 
 Feature/repair work should generally follow:
 
 ```text
-Railway-API-Implementation
-        |
-        v
+main
+  |
+  v
 feature-or-repair-branch
-        |
-        v
+  |
+  v
 build + tests + review
-        |
-        v
-PR back to Railway-API-Implementation
+  |
+  v
+PR back to main
 ```
+
+`Railway-API-Implementation` is transitional only and should mirror `main` until the Railway service source branch is switched to `main`.
 
 Several historical `agent/*`, audit, build, and deployment-probe branches may remain in the repository. They should not be merged merely because they exist; many were intentionally temporary CI or release-validation branches.
 
@@ -885,6 +887,7 @@ Before an Android/public release, verify at minimum:
 - [ ] Live Android multiplayer sanity checked
 - [ ] Google Play products active before paid-currency testing
 - [ ] Railway Google Play service account configured
+- [ ] Voided-purchase reconciliation enabled and migration 009 applied
 - [ ] License-tester purchase verified before enabling paid commerce broadly
 
 ---
@@ -912,9 +915,8 @@ For paid coins/gems:
 
 The major systems are implemented, but ongoing production hardening still includes:
 
-- Google Play refund/chargeback reconciliation;
-- Real-time Developer Notifications / voided-purchase handling;
-- dedicated adversarial commerce unit/integration tests;
+- optional Real-time Developer Notifications for faster-than-polling purchase lifecycle signals;
+- deeper adversarial commerce integration tests beyond the refund/replay unit coverage;
 - release AAB/R8 validation as a permanent CI gate;
 - more production-quality cosmetic artwork and presentation;
 - additional multiplayer/load testing;
@@ -947,7 +949,7 @@ GOOGLE_PLAY_SERVICE_ACCOUNT_JSON
 GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64
 ```
 
-and redeploy Railway.
+and redeploy Railway. Billing diagnostics are internal-only at `/internal/billing-status` and require `X-Internal-Token`.
 
 ## Railway reports `account_mismatch`
 

@@ -4,6 +4,7 @@ import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -12,7 +13,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.io.IOException
 
 private const val TAG = "MatchViewModel"
 private const val MAX_RECONNECT_ATTEMPTS = 4
@@ -93,11 +93,13 @@ class MatchViewModel(app: Application) : AndroidViewModel(app) {
                     // nothing to reconnect to.
                     if (_uiState.value.match?.phase == Phase.FINISHED) return@launch
                     attempt += 1
-                } catch (e: IOException) {
-                    Log.w(TAG, "Match connection dropped: ${e.message}")
-                    attempt += 1
-                } catch (e: IllegalStateException) {
-                    Log.w(TAG, "Match session error: ${e.message}")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // Ktor can surface transport, HTTP and serialization failures
+                    // through different exception types. Treat them all as a
+                    // recoverable arena-session failure instead of crashing UI.
+                    Log.w(TAG, "Match session failure (${e::class.simpleName}): ${e.message}")
                     attempt += 1
                 }
 

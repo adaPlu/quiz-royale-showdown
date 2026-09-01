@@ -117,7 +117,9 @@ export function normalizeStats(raw: unknown): PlayerStats {
 }
 
 function normalizeBalance(raw: unknown): number {
-  return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+  // Negative balances represent chargeback/refund debt and are intentionally
+  // preserved so future earnings repay the reversed purchase.
+  return typeof raw === "number" && Number.isFinite(raw) ? Math.trunc(raw) : 0;
 }
 
 export function applyRank(rawStats: PlayerStats, rank: number | null): PlayerStats {
@@ -139,6 +141,8 @@ export type MatchOutcome = {
   powerUpsUsed: number;
   categoryPoints: Record<string, number>;
   recordWinLoss: boolean;
+  /** Optional for compatibility with older workers; false for Practice. */
+  competitiveRewards?: boolean;
 };
 
 export function applyOutcome(rawBase: PlayerStats, outcome: MatchOutcome): PlayerStats {
@@ -150,6 +154,8 @@ export function applyOutcome(rawBase: PlayerStats, outcome: MatchOutcome): Playe
 
   const placements = [base.bestPlacement, outcome.placement].filter((p): p is number => p !== null);
   const counted = outcome.recordWinLoss;
+  const competitive = outcome.competitiveRewards ?? counted;
+  if (!competitive) return base;
 
   return {
     wins: base.wins + (counted && outcome.won ? 1 : 0),

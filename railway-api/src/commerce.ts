@@ -1,5 +1,5 @@
 import http from "node:http";
-import { createHash, createSign } from "node:crypto";
+import { createHash, createSign, timingSafeEqual } from "node:crypto";
 import { URL } from "node:url";
 import { pool, tx, type DbClient } from "./db.js";
 
@@ -7,6 +7,27 @@ type CurrencyKind = "coins" | "gems";
 type Balances = { coins: number; gems: number; seasonalTickets: number };
 type PaidProduct = { product_id: string; currency: CurrencyKind; amount: number };
 type PurchaseReceiptIdentity = { user_id: string; product_id: string };
+type PurchaseReceiptRow = PurchaseReceiptIdentity & {
+  token_digest: string;
+  quantity: number;
+  currency: CurrencyKind;
+  amount_per_unit: number;
+  granted_amount: number;
+  reversed_amount: number;
+};
+type GoogleVoidedPurchase = {
+  purchaseToken?: string;
+  orderId?: string;
+  purchaseTimeMillis?: string;
+  voidedTimeMillis?: string;
+  voidedSource?: string | number;
+  voidedReason?: string | number;
+  voidedQuantity?: string | number;
+};
+type GoogleVoidedPurchasesResponse = {
+  voidedPurchases?: GoogleVoidedPurchase[];
+  tokenPagination?: { nextPageToken?: string };
+};
 type CommerceUser = {
   user_id: string;
   currency_balances: unknown;
@@ -52,8 +73,206 @@ const DEFAULT_ORIGINS = new Set([
   "http://127.0.0.1:4173",
 ]);
 const PAGES_HOST = "quiz-royale-showdown.pages.dev";
+const VOIDED_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000;
+const DEFAULT_VOIDED_RECONCILE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 let accessTokenCache: { token: string; expiresAt: number } | null = null;
+
+export function startGooglePlayVoidedPurchaseReconciler(): () => void {
+  if (process.env.NODE_ENV === "test" || process.env.GOOGLE_PLAY_VOIDED_RECONCILIATION === "false") {
+    return () => undefined;
+  }
+
+  const configured = Number.parseInt(process.env.GOOGLE_PLAY_VOIDED_RECONCILE_INTERVAL_MS ?? "", 10);
+  const intervalMs = Number.isFinite(configured) && configured >= 60_000
+    ? configured
+    : DEFAULT_VOIDED_RECONCILE_INTERVAL_MS;
+
+  const run = () => {
+    reconcileVoidedPurchases().catch((error) => {
+      console.error("Google Play voided purchase reconciliation failed", (error as Error)?.message);
+    });
+  };
+
+  const initial = setTimeout(run, 30_000);
+  initial.unref?.();
+  const timer = setInterval(run, intervalMs);
+  timer.unref?.();
+
+  return () => {
+    clearTimeout(initial);
+    clearInterval(timer);
+  };
+}
+
+export async function reconcileVoidedPurchases(now = Date.now()): Promise<Record<string, unknown>> {
+  const credentials = serviceAccount();
+  if (!credentials) {
+    return { ok: false, error: "billing_not_configured", processed: 0, reversed: 0 };
+  }
+
+  const accessToken = await googleAccessToken(credentials);
+  let pageToken: string | null = null;
+  let processed = 0;
+  let reversed = 0;
+  let duplicates = 0;
+  let unmatched = 0;
+  let pages = 0;
+
+  do {
+    const endpoint = new URL(
+      `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${encodeURIComponent(PACKAGE_NAME)}/purchases/voidedpurchases`,
+    );
+    endpoint.searchParams.set("startTime", String(Math.max(0, now - VOIDED_LOOKBACK_MS)));
+    endpoint.searchParams.set("endTime", String(now));
+    endpoint.searchParams.set("type", "0");
+    endpoint.searchParams.set("includeQuantityBasedPartialRefund", "true");
+    endpoint.searchParams.set("maxResults", "1000");
+    if (pageToken) endpoint.searchParams.set("token", pageToken);
+
+    const response = await fetch(endpoint, { headers: { Authorization: `Bearer ${accessToken}` } });
+    const text = await response.text();
+    if (!response.ok) {
+      console.warn("Google Play voided purchase query failed", response.status, text.slice(0, 300));
+      throw new Error(`Google Play voided purchases returned ${response.status}`);
+    }
+
+    let payload: GoogleVoidedPurchasesResponse = {};
+    try {
+      payload = text ? JSON.parse(text) as GoogleVoidedPurchasesResponse : {};
+    } catch {
+      throw new Error("Google Play voided purchases returned invalid JSON");
+    }
+
+    for (const event of payload.voidedPurchases ?? []) {
+      if (!event.purchaseToken) continue;
+      processed += 1;
+      const result = await reverseVoidedPurchase(event, now);
+      if (result === "reversed") reversed += 1;
+      else if (result === "duplicate") duplicates += 1;
+      else unmatched += 1;
+    }
+
+    pageToken = payload.tokenPagination?.nextPageToken?.trim() || null;
+    pages += 1;
+  } while (pageToken && pages < 20);
+
+  return { ok: true, processed, reversed, duplicates, unmatched, pages };
+}
+
+async function reverseVoidedPurchase(
+  event: GoogleVoidedPurchase,
+  now: number,
+): Promise<"reversed" | "duplicate" | "unmatched"> {
+  const token = event.purchaseToken?.trim();
+  if (!token) return "unmatched";
+  const tokenDigest = sha256(token);
+  const eventKey = sha256([
+    tokenDigest,
+    event.orderId ?? "",
+    event.voidedTimeMillis ?? "",
+    event.voidedQuantity ?? "FULL",
+    event.voidedReason ?? "",
+    event.voidedSource ?? "",
+  ].join(":"));
+
+  return tx(async (client) => {
+    const receiptResult = await client.query<PurchaseReceiptRow>(
+      `SELECT token_digest, user_id, product_id, quantity, currency, amount_per_unit,
+              granted_amount, COALESCE(reversed_amount, 0) AS reversed_amount
+       FROM play_purchase_receipts
+       WHERE token_digest = $1
+       FOR UPDATE`,
+      [tokenDigest],
+    );
+    const receipt = receiptResult.rows[0];
+    if (!receipt) return "unmatched" as const;
+
+    const seen = await client.query("SELECT 1 FROM play_purchase_voids WHERE event_key = $1", [eventKey]);
+    if (seen.rowCount) return "duplicate" as const;
+
+    const user = await getCommerceUser(client, receipt.user_id, true);
+    if (!user) return "unmatched" as const;
+
+    const voidedQuantity = optionalPositiveInt(event.voidedQuantity);
+    const amount = voidReversalAmount(
+      Number(receipt.granted_amount),
+      Number(receipt.amount_per_unit),
+      Number(receipt.reversed_amount),
+      voidedQuantity,
+    );
+    const balances = normalizeBalances(user.currency_balances);
+    const next = { ...balances, [receipt.currency]: balances[receipt.currency] - amount };
+    const voidedAt = parseMillis(String(event.voidedTimeMillis ?? "")) ?? now;
+    const reason = optionalInt(event.voidedReason);
+    const source = optionalInt(event.voidedSource);
+
+    if (amount > 0) {
+      await client.query(
+        "UPDATE users SET currency_balances = $2 WHERE user_id = $1",
+        [receipt.user_id, JSON.stringify(next)],
+      );
+      await client.query(
+        `INSERT INTO currency_ledger(
+          ledger_id, user_id, currency, delta, balance_after, reason, reference_id, created_at
+        ) VALUES ($1,$2,$3,$4,$5,'google_play_void',$6,$7)
+        ON CONFLICT DO NOTHING`,
+        [
+          `cl-void-${eventKey.slice(0, 40)}`,
+          receipt.user_id,
+          receipt.currency,
+          -amount,
+          next[receipt.currency],
+          eventKey,
+          now,
+        ],
+      );
+    }
+
+    await client.query(
+      `INSERT INTO play_purchase_voids(
+        event_key, token_digest, user_id, product_id, voided_at, voided_quantity,
+        voided_reason, voided_source, reversed_amount, processed_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [
+        eventKey,
+        tokenDigest,
+        receipt.user_id,
+        receipt.product_id,
+        voidedAt,
+        voidedQuantity,
+        reason,
+        source,
+        amount,
+        now,
+      ],
+    );
+    await client.query(
+      `UPDATE play_purchase_receipts
+       SET reversed_amount = LEAST(granted_amount, COALESCE(reversed_amount, 0) + $2),
+           voided_at = GREATEST(COALESCE(voided_at, 0), $3),
+           voided_reason = COALESCE($4, voided_reason),
+           voided_source = COALESCE($5, voided_source)
+       WHERE token_digest = $1`,
+      [tokenDigest, amount, voidedAt, reason, source],
+    );
+
+    return amount > 0 ? "reversed" as const : "duplicate" as const;
+  });
+}
+
+export function voidReversalAmount(
+  grantedAmount: number,
+  amountPerUnit: number,
+  alreadyReversed: number,
+  voidedQuantity: number | null = null,
+): number {
+  const remaining = Math.max(0, Math.floor(grantedAmount) - Math.max(0, Math.floor(alreadyReversed)));
+  if (remaining === 0) return 0;
+  if (voidedQuantity === null) return remaining;
+  const requested = Math.max(0, Math.floor(amountPerUnit)) * Math.max(0, Math.floor(voidedQuantity));
+  return Math.min(remaining, requested);
+}
 
 export async function handleCommerceRequest(
   request: http.IncomingMessage,
@@ -63,7 +282,8 @@ export async function handleCommerceRequest(
   const isCommerceRoute =
     url.pathname === "/store/currency-packs" ||
     url.pathname === "/store/google-play/verify" ||
-    url.pathname === "/store/billing-status";
+    url.pathname === "/internal/billing-status" ||
+    url.pathname === "/internal/google-play/reconcile-voided";
   if (!isCommerceRoute) return false;
 
   const origin = typeof request.headers.origin === "string" ? request.headers.origin.trim().replace(/\/$/, "") : "";
@@ -76,7 +296,7 @@ export async function handleCommerceRequest(
     response.setHeader("Vary", "Origin");
   }
   response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  response.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  response.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Internal-Token");
   if (request.method === "OPTIONS") {
     response.writeHead(204);
     response.end();
@@ -84,11 +304,18 @@ export async function handleCommerceRequest(
   }
 
   try {
-    if (request.method === "GET" && url.pathname === "/store/billing-status") {
-      return finish(response, {
-        status: 200,
-        body: billingStatus(),
-      });
+    if (request.method === "GET" && url.pathname === "/internal/billing-status") {
+      if (!authorizedInternal(request)) {
+        return finish(response, { status: 401, body: { error: "unauthorized" } });
+      }
+      return finish(response, { status: 200, body: billingStatus() });
+    }
+
+    if (request.method === "POST" && url.pathname === "/internal/google-play/reconcile-voided") {
+      if (!authorizedInternal(request)) {
+        return finish(response, { status: 401, body: { error: "unauthorized" } });
+      }
+      return finish(response, { status: 200, body: await reconcileVoidedPurchases() });
     }
 
     if (request.method === "GET" && url.pathname === "/store/currency-packs") {
@@ -392,7 +619,7 @@ function normalizeBalances(raw: unknown): Balances {
 }
 
 function safeBalance(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  return typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : 0;
 }
 
 function accountBinding(userId: string): string {
@@ -510,6 +737,12 @@ function billingStatus(): Record<string, unknown> {
       type: base64Type,
     },
     deployCommit: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 12) ?? null,
+    railwayRuntime: {
+      serviceId: process.env.RAILWAY_SERVICE_ID ?? null,
+      serviceName: process.env.RAILWAY_SERVICE_NAME ?? null,
+      environmentId: process.env.RAILWAY_ENVIRONMENT_ID ?? null,
+      environmentName: process.env.RAILWAY_ENVIRONMENT_NAME ?? null,
+    },
   };
 }
 
@@ -578,6 +811,26 @@ function isAllowedOrigin(origin: string): boolean {
   } catch {
     return false;
   }
+}
+
+function authorizedInternal(request: http.IncomingMessage): boolean {
+  const expected = process.env.INTERNAL_API_TOKEN?.trim();
+  const provided = headerValue(request, "x-internal-token")?.trim();
+  if (!expected || !provided) return false;
+  const a = createHash("sha256").update(provided).digest();
+  const b = createHash("sha256").update(expected).digest();
+  return timingSafeEqual(a, b);
+}
+
+function optionalInt(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function optionalPositiveInt(value: unknown): number | null {
+  const parsed = optionalInt(value);
+  return parsed !== null && parsed > 0 ? parsed : null;
 }
 
 function headerValue(request: http.IncomingMessage, name: string): string | null {

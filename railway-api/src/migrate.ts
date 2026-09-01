@@ -33,6 +33,10 @@ const managedTables = new Set([
   "player_cosmetics",
   "equipped_cosmetics",
   "store_purchases",
+  "paid_currency_products",
+  "play_purchase_receipts",
+  "user_season_passes",
+  "play_purchase_voids",
 ]);
 
 async function main(): Promise<void> {
