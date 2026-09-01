@@ -8,6 +8,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { buildQuestionSet, type Question } from "./questions";
+import { competitiveRewardsForMode } from "./match-policy";
 import { callDo, GUEST_REGISTRY_ID, USER_DIRECTORY_ID, type DoClassName, type DoEnv } from "./do-dispatch";
 import type { MatchOutcome, SubjectKind } from "./identity";
 import {
@@ -562,6 +563,7 @@ export class MatchRoom extends DurableObject<Env> {
   /** Converts the final roster into one stat report per human player. */
   private buildOutcomes(state: MatchState): MatchOutcome[] {
     const outcomes: MatchOutcome[] = [];
+    const competitiveRewards = competitiveRewardsForMode(state.mode);
     for (const id of state.order) {
       const p = state.players[id];
       if (!p || p.isBot || !p.subjectKind) continue;
@@ -578,8 +580,8 @@ export class MatchRoom extends DurableObject<Env> {
         categoryPoints: p.categoryPoints,
         // Practice is a solo drill. It must not mint persistent points,
         // leaderboard progress, power-up charges, currency, or season rewards.
-        recordWinLoss: state.mode !== "PRACTICE",
-        competitiveRewards: state.mode !== "PRACTICE",
+        recordWinLoss: competitiveRewards,
+        competitiveRewards,
       });
     }
     return outcomes;
