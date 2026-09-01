@@ -184,11 +184,13 @@ export type MatchOutcome = {
   correctAnswers: number;
   powerUpsUsed: number;
   categoryPoints: Record<string, number>;
-  /**
-   * False for Practice runs: they still earn points and category progress, but
-   * a solo drill must not inflate a win/loss record.
-   */
+  /** False for Practice runs, which must not mutate persistent competitive progression. */
   recordWinLoss: boolean;
+  /**
+   * Explicit economy/progression gate. Optional for wire compatibility with
+   * older match workers; when absent, recordWinLoss is the fallback signal.
+   */
+  competitiveRewards?: boolean;
 };
 
 /** Folds a finished match into a stat block. Pure, so it is trivially testable. */
@@ -207,6 +209,9 @@ export function applyOutcome(base: PlayerStats, outcome: MatchOutcome): PlayerSt
         : Math.min(stats.bestPlacement, outcome.placement);
 
   const counted = outcome.recordWinLoss;
+  const competitive = outcome.competitiveRewards ?? counted;
+  if (!competitive) return stats;
+
   return {
     wins: stats.wins + (counted && outcome.won ? 1 : 0),
     losses: stats.losses + (counted && !outcome.won ? 1 : 0),
