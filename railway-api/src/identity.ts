@@ -117,7 +117,9 @@ export function normalizeStats(raw: unknown): PlayerStats {
 }
 
 function normalizeBalance(raw: unknown): number {
-  return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+  // Negative balances represent chargeback/refund debt and are intentionally
+  // preserved so future earnings repay the reversed purchase.
+  return typeof raw === "number" && Number.isFinite(raw) ? Math.trunc(raw) : 0;
 }
 
 export function applyRank(rawStats: PlayerStats, rank: number | null): PlayerStats {
