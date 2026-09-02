@@ -1,4 +1,4 @@
-name: Android Current 1.7 APK
+name: Android Current 1.8 APK
 
 on:
   push:
@@ -36,8 +36,8 @@ jobs:
 
       - name: Verify version
         run: |
-          grep 'versionCode = 1787428686' app/build.gradle.kts
-          grep 'versionName = "1.7"' app/build.gradle.kts
+          grep 'versionCode = 1787428687' app/build.gradle.kts
+          grep 'versionName = "1.8"' app/build.gradle.kts
 
       - name: Run unit tests
         run: ./gradlew :app:testDebugUnitTest --stacktrace
@@ -50,8 +50,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-artifacts
-          cp app/build/outputs/apk/debug/app-debug.apk release-artifacts/QuizRoyaleShowdown-v1.7-code1787428686-debug.apk
-          cp app/build/outputs/apk/release/app-release-unsigned.apk release-artifacts/QuizRoyaleShowdown-v1.7-code1787428686-release-unsigned.apk
+          cp app/build/outputs/apk/debug/app-debug.apk release-artifacts/QuizRoyaleShowdown-v1.8-code1787428687-debug.apk
+          cp app/build/outputs/apk/release/app-release-unsigned.apk release-artifacts/QuizRoyaleShowdown-v1.8-code1787428687-release-unsigned.apk
           cd release-artifacts
           sha256sum * > SHA256SUMS.txt
           ls -lh
@@ -59,7 +59,7 @@ jobs:
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: quiz-royale-current-v1.7-code1787428686-apks
+          name: quiz-royale-current-v1.8-code1787428687-apks
           path: android-quiz-royale-showdown/release-artifacts/*
           if-no-files-found: error
           retention-days: 14
