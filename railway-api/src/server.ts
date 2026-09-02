@@ -871,6 +871,9 @@ async function purchaseStoreItem(request: http.IncomingMessage): Promise<ApiResp
     if (item.item_type === "SEASON_PASS") {
       const seasonId = storePayloadString(item.payload, "seasonId");
       if (!seasonId) return { status: 409 as const, body: { error: "invalid_item", message: "This season pass is misconfigured." } };
+      if (!await seasonIsCurrent(client, seasonId)) {
+        return { status: 409 as const, body: { error: "season_not_current", message: "That season pass is not currently available." } };
+      }
       if (await hasSeasonPass(client, user.user_id, seasonId, user.entitlements)) {
         return { status: 409 as const, body: { error: "already_owned", message: "You already own this season pass." } };
       }
@@ -1357,12 +1360,21 @@ async function getActiveSeason(db: DbClient): Promise<SeasonRow | null> {
   const result = await db.query<SeasonRow>(
     `SELECT season_id, name, starts_at, ends_at, reward_track
      FROM seasons
-     WHERE active = true AND starts_at <= $1 AND ends_at > $1
-     ORDER BY starts_at DESC
+     WHERE starts_at <= $1 AND ends_at > $1
+     ORDER BY active DESC, starts_at DESC, created_at DESC, season_id
      LIMIT 1`,
     [now],
   );
   return result.rows[0] ?? null;
+}
+
+async function seasonIsCurrent(db: DbClient, seasonId: string): Promise<boolean> {
+  const now = Date.now();
+  const result = await db.query(
+    "SELECT 1 FROM seasons WHERE season_id = $1 AND starts_at <= $2 AND ends_at > $2",
+    [seasonId, now],
+  );
+  return Boolean(result.rowCount);
 }
 
 function seasonDto(row: SeasonRow): SeasonDto {
@@ -1453,7 +1465,13 @@ async function hydrateStoreItems(db: DbClient, record: UserRow): Promise<StoreIt
   );
   const entitlements = normalizeEntitlements(record.entitlements);
   const ownedCosmetics = await ownedCosmeticIds(db, record.user_id);
-  return Promise.all(rows.rows.map(async (row) => {
+  const current = await getActiveSeason(db);
+  const visibleRows = rows.rows.filter((row) => {
+    if (row.item_type !== "SEASON_PASS") return true;
+    const seasonId = storePayloadString(row.payload ?? {}, "seasonId");
+    return Boolean(seasonId && seasonId === current?.season_id);
+  });
+  return Promise.all(visibleRows.map(async (row) => {
     const payload = row.payload ?? {};
     const cosmeticId = storePayloadString(payload, "cosmeticId");
     const seasonId = storePayloadString(payload, "seasonId");
