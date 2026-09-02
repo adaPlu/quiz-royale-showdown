@@ -7,6 +7,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { MODE_CONFIG, type GameMode } from "./protocol";
+import { enforceRateLimit } from "./rate-limit";
 
 type Bucket = {
   roomId: string;
@@ -21,6 +22,19 @@ export class Matchmaker extends DurableObject {
     const url = new URL(request.url);
     const mode = parseMode(this.ctx.id.name ?? url.searchParams.get("mode"));
     const cfg = MODE_CONFIG[mode];
+
+    const rateLimitOnly = request.headers.get("X-Quiz-Rate-Limit-Only")?.trim();
+    const action = rateLimitOnly === "socket-ticket" ? "socket-ticket" : "matchmake";
+    const limited = await enforceRateLimit(
+      this.ctx,
+      request,
+      action,
+      action === "socket-ticket"
+        ? { max: 60, windowMs: 60_000 }
+        : { max: 30, windowMs: 60_000 },
+    );
+    if (limited) return limited;
+    if (rateLimitOnly) return new Response(null, { status: 204 });
 
     const bucket = await this.ctx.storage.get<Bucket>(BUCKET_KEY);
     const now = Date.now();
