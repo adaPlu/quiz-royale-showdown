@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
-import { handleCommerceRequest, voidReversalAmount } from "./commerce.js";
+import { handleCommerceRequest, rtdnEventKind, voidReversalAmount } from "./commerce.js";
 
 test("full void reverses the remaining granted entitlement", () => {
   assert.equal(voidReversalAmount(500, 500, 0, null), 500);
@@ -19,6 +19,15 @@ test("refund reversal is capped at the original grant", () => {
   assert.equal(voidReversalAmount(500, 500, 0, 9), 500);
 });
 
+
+
+test("RTDN lifecycle events are classified without trusting notification contents", () => {
+  assert.equal(rtdnEventKind({ voidedPurchaseNotification: {} }), "voided_purchase");
+  assert.equal(rtdnEventKind({ pendingRefundReviewNotification: {} }), "pending_refund_review");
+  assert.equal(rtdnEventKind({ oneTimeProductNotification: {} }), "one_time_product");
+  assert.equal(rtdnEventKind({ testNotification: {} }), "test");
+  assert.equal(rtdnEventKind({}), "unknown");
+});
 
 test("billing diagnostics are internal-only", async () => {
   const previous = process.env.INTERNAL_API_TOKEN;
