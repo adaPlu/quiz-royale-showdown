@@ -429,9 +429,57 @@ function SeasonScreen({ identity }: { identity: Identity }) {
   const [error, setError] = useState<string | null>(null);
   useEffect(() => { setSeason(null); setError(null); loadSeason(identity).then(setSeason).catch((e: Error) => setError(e.message)); }, [identity]);
   if (identity.kind === "guest") return <LockedPage title="SEASON" message="Register or sign in to track seasonal XP and rewards." />;
+
   const progress = season?.progress;
   const levelProgress = progress ? (progress.xp % 1000) / 10 : 0;
-  return <ArenaPage title="SEASON" subtitle="Climb the current reward track">{error && <InlineError>{error}</InlineError>}{!season && !error && <p className="muted" aria-live="polite">Loading season…</p>}{season && <><section className="arena-card season-hero"><Sparkles className="violet-text" size={34} aria-hidden="true" /><div><p className="eyebrow">CURRENT SEASON</p><h2>{season.season.name}</h2></div></section><section className="arena-card"><div className="season-level"><strong>LEVEL {progress?.level}</strong><span>{progress?.xp} XP</span></div><div className="progress" role="progressbar" aria-valuenow={levelProgress} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${levelProgress}%` }} /></div><p className="muted">Tickets earned: {progress?.ticketsEarned ?? 0}</p></section></>}</ArenaPage>;
+  const daysLeft = season ? Math.max(0, Math.ceil((season.season.endsAt - Date.now()) / 86_400_000)) : 0;
+
+  return (
+    <ArenaPage title="SEASON" subtitle="Climb the current reward track">
+      {error && <InlineError>{error}</InlineError>}
+      {!season && !error && <p className="muted" aria-live="polite">Loading season…</p>}
+      {season && (
+        <>
+          <section className="arena-card season-hero">
+            <Sparkles className="violet-text" size={34} aria-hidden="true" />
+            <div>
+              <p className="eyebrow">CURRENT SEASON · {daysLeft} DAYS LEFT</p>
+              <h2>{season.season.name}</h2>
+              <small>{season.hasSeasonPass ? "Premium pass active" : "Free reward track"}</small>
+            </div>
+          </section>
+          <section className="arena-card">
+            <div className="season-level"><strong>LEVEL {progress?.level}</strong><span>{progress?.xp} XP</span></div>
+            <div className="progress" role="progressbar" aria-valuenow={levelProgress} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${levelProgress}%` }} /></div>
+            <p className="muted">Tickets earned: {progress?.ticketsEarned ?? 0} · {1000 - ((progress?.xp ?? 0) % 1000)} XP to next level</p>
+          </section>
+          <section className="season-track" aria-label="Season reward milestones">
+            {season.season.rewardTrack.map((reward, index) => {
+              const level = Number(reward.level ?? 1);
+              const premium = reward.premium === true;
+              const reached = (progress?.level ?? 1) >= level;
+              const unlocked = reached && (!premium || season.hasSeasonPass === true);
+              return (
+                <article className={unlocked ? "arena-card season-reward unlocked" : "arena-card season-reward"} key={`${level}-${index}`}>
+                  <div><strong>LEVEL {level}</strong>{premium && <em>PREMIUM</em>}</div>
+                  <span>{seasonRewardText(reward)}</span>
+                  <small>{unlocked ? "EARNED" : reached && premium ? "PASS REQUIRED" : "LOCKED"}</small>
+                </article>
+              );
+            })}
+          </section>
+        </>
+      )}
+    </ArenaPage>
+  );
+}
+
+function seasonRewardText(reward: Record<string, unknown>): string {
+  const parts: string[] = [];
+  if (Number(reward.coins) > 0) parts.push(`${Number(reward.coins)} coins`);
+  if (Number(reward.gems) > 0) parts.push(`${Number(reward.gems)} gems`);
+  if (Number(reward.seasonalTickets) > 0) parts.push(`${Number(reward.seasonalTickets)} bonus tickets`);
+  return parts.length > 0 ? parts.join(" · ") : "Mystery reward";
 }
 
 function ProfileScreen({ identity, onIdentity, onMessage }: { identity: Identity; onIdentity: (identity: Identity) => void; onMessage: (message: string | null) => void }) {
