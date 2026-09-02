@@ -14,7 +14,7 @@ import {
   type DoClassName,
   type DoEnv,
 } from "./do-dispatch";
-import type { GameMode } from "./protocol";
+import type { GameMode, MatchAppearance } from "./protocol";
 import type { GuestSessionDto, SubjectKind } from "./identity";
 import { callRailwayJson } from "./railway-api";
 import { buildMatchRoomTargetUrl } from "./match-routing";
@@ -181,6 +181,7 @@ type ResolvedIdentity = {
   subjectId: string;
   displayName: string;
   powerUpCharges: number;
+  appearance: MatchAppearance | null;
 };
 
 async function handleMatchSocket(
@@ -211,7 +212,7 @@ async function handleMatchSocket(
 async function resolveIdentity(env: Env, request: Request, url: URL): Promise<ResolvedIdentity | null> {
   const token = bearer(request);
   if (token) {
-    const railway = await callRailwayJson<{ userId: string; username: string; powerUpCharges: number }>(
+    const railway = await callRailwayJson<{ userId: string; username: string; powerUpCharges: number; appearance?: MatchAppearance | null }>(
       env,
       "/auth/resolve",
       { token },
@@ -222,6 +223,7 @@ async function resolveIdentity(env: Env, request: Request, url: URL): Promise<Re
         subjectId: railway.userId,
         displayName: railway.username,
         powerUpCharges: railway.powerUpCharges,
+        appearance: railway.appearance ?? null,
       };
     }
 
@@ -241,6 +243,7 @@ async function resolveIdentity(env: Env, request: Request, url: URL): Promise<Re
         subjectId: body.userId,
         displayName: body.username,
         powerUpCharges: body.powerUpCharges ?? 0,
+        appearance: null,
       };
     }
   }
@@ -259,6 +262,7 @@ async function resolveIdentity(env: Env, request: Request, url: URL): Promise<Re
         subjectId: railway.guestId,
         displayName: railway.displayName,
         powerUpCharges: railway.powerUpCharges,
+        appearance: null,
       };
     }
 
@@ -282,6 +286,7 @@ async function resolveIdentity(env: Env, request: Request, url: URL): Promise<Re
         subjectId: body.guestId,
         displayName: body.displayName,
         powerUpCharges: body.powerUpCharges ?? 0,
+        appearance: null,
       };
     }
   }
@@ -300,6 +305,7 @@ async function resolveIdentity(env: Env, request: Request, url: URL): Promise<Re
       subjectId: railwayGuest.guest.guestId,
       displayName: railwayGuest.guest.displayName,
       powerUpCharges: railwayGuest.guest.stats.powerUpCharges,
+      appearance: null,
     };
   }
 
@@ -321,6 +327,7 @@ async function resolveIdentity(env: Env, request: Request, url: URL): Promise<Re
     subjectId: body.guest.guestId,
     displayName: body.guest.displayName,
     powerUpCharges: body.guest.stats.powerUpCharges,
+    appearance: null,
   };
 }
 
