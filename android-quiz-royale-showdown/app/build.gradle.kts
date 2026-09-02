@@ -6,6 +6,34 @@ plugins {
 }
 
 val releaseBuildRequested = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
+fun environmentValue(name: String): String =
+    providers.environmentVariable(name).orNull?.trim().orEmpty()
+
+fun secretEnvironmentValue(name: String): String =
+    providers.environmentVariable(name).orNull.orEmpty()
+
+val releaseSigningRequired = environmentValue("ANDROID_RELEASE_SIGNING_REQUIRED").equals("true", ignoreCase = true)
+val releaseKeystorePath = environmentValue("ANDROID_KEYSTORE_PATH")
+val releaseKeystorePassword = secretEnvironmentValue("ANDROID_KEYSTORE_PASSWORD")
+val releaseKeyAlias = environmentValue("ANDROID_KEY_ALIAS")
+val releaseKeyPassword = secretEnvironmentValue("ANDROID_KEY_PASSWORD")
+val releaseSigningConfigured =
+    releaseKeystorePath.isNotBlank() &&
+        releaseKeystorePassword.isNotEmpty() &&
+        releaseKeyAlias.isNotBlank() &&
+        releaseKeyPassword.isNotEmpty()
+val releaseKeystoreFile = releaseKeystorePath.takeIf { it.isNotBlank() }?.let(::file)
+
+if (releaseSigningRequired && !releaseSigningConfigured) {
+    throw GradleException(
+        "Signed release requested but ANDROID_KEYSTORE_PATH, ANDROID_KEYSTORE_PASSWORD, " +
+            "ANDROID_KEY_ALIAS, or ANDROID_KEY_PASSWORD is missing."
+    )
+}
+if (releaseSigningRequired && releaseKeystoreFile?.isFile != true) {
+    throw GradleException("ANDROID_KEYSTORE_PATH does not point to a readable keystore file.")
+}
+
 fun configuredValue(name: String, defaultValue: String): String =
     providers.gradleProperty(name)
         .orElse(providers.environmentVariable(name))
@@ -39,14 +67,28 @@ android {
         applicationId = "com.rork.quizroyaleshowdown"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1787428687
-        versionName = "1.8"
+        versionCode = 1787428688
+        versionName = "1.9"
         buildConfigField("String", "EXPO_PUBLIC_RAILWAY_API_URL", railwayApiUrl.toBuildConfigLiteral())
         buildConfigField("String", "EXPO_PUBLIC_RORK_FUNCTIONS_URL", rorkFunctionsUrl.toBuildConfigLiteral())
     }
 
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            create("release") {
+                storeFile = releaseKeystoreFile
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
