@@ -1,5 +1,5 @@
 import type { DoEnv } from "./do-dispatch";
-import type { GameMode } from "./protocol";
+import type { GameMode, MatchAppearance } from "./protocol";
 
 const ROOM_TICKET_TTL_MS = 30 * 60 * 1000;
 const SOCKET_TICKET_TTL_MS = 2 * 60 * 1000;
@@ -11,6 +11,7 @@ export type SocketIdentity = {
   subjectId: string;
   displayName: string;
   powerUpCharges: number;
+  appearance?: MatchAppearance | null;
 };
 
 type SocketTicketPayload = SocketIdentity & {
@@ -114,6 +115,7 @@ export async function verifySocketTicket(
     subjectId: payload.subjectId,
     displayName: payload.displayName,
     powerUpCharges: payload.powerUpCharges,
+    appearance: payload.appearance ?? null,
   };
 }
 
