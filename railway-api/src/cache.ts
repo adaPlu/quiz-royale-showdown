@@ -76,6 +76,20 @@ export async function withRedisLock<T>(
   }
 }
 
+export async function cacheHealth(): Promise<"connected" | "fallback" | "not_configured"> {
+  if (!process.env.REDIS_URL) return "not_configured";
+  const r = await redis();
+  if (!r) return "fallback";
+  try {
+    await r.ping();
+    return "connected";
+  } catch (error) {
+    disabled = true;
+    console.warn("Redis health check failed; using Postgres fallback:", (error as Error).message);
+    return "fallback";
+  }
+}
+
 export async function closeCache(): Promise<void> {
   if (client?.isOpen) await client.quit().catch(() => undefined);
 }

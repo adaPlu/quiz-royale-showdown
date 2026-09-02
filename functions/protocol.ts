@@ -69,6 +69,18 @@ export type PublicQuestion = {
   options: string[];
 };
 
+export type MatchAppearanceCosmetic = {
+  cosmeticId: string;
+  displayName: string;
+};
+
+export type MatchAppearance = {
+  avatarFrame: MatchAppearanceCosmetic | null;
+  banner: MatchAppearanceCosmetic | null;
+  title: MatchAppearanceCosmetic | null;
+  badge: MatchAppearanceCosmetic | null;
+};
+
 export type PublicPlayer = {
   id: string;
   name: string;
@@ -82,6 +94,7 @@ export type PublicPlayer = {
   lastAnswerCorrect: boolean | null;
   /** 1 = winner. Null while still alive and the match is running. */
   placement: number | null;
+  appearance: MatchAppearance | null;
 };
 
 export type PublicMatch = {

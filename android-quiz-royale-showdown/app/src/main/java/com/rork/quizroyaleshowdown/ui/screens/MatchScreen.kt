@@ -433,7 +433,11 @@ private fun LobbyPlayerRow(player: PublicPlayer) {
         }
         Spacer(Modifier.width(12.dp))
         Text(
-            text = player.name,
+            text = buildString {
+                append(player.name)
+                player.appearance?.title?.let { append(" · ${it.displayName}") }
+                player.appearance?.badge?.let { append(" · ${it.displayName}") }
+            },
             style = MaterialTheme.typography.bodyLarge,
             color = Arena.TextHi,
             modifier = Modifier.weight(1f)
@@ -821,7 +825,11 @@ private fun SurvivorRail(
                         )
                         .border(
                             if (isYou) 2.dp else 1.dp,
-                            if (isYou) Arena.GoldBright else animatedTint.copy(alpha = 0.6f),
+                            when {
+                                isYou -> Arena.GoldBright
+                                player.appearance?.avatarFrame != null -> Arena.Violet
+                                else -> animatedTint.copy(alpha = 0.6f)
+                            },
                             RoundedCornerShape(50)
                         )
                         .alpha(if (player.alive) 1f else 0.4f),
@@ -982,7 +990,11 @@ private fun StandingRow(rank: Int, player: PublicPlayer, isYou: Boolean) {
             )
             .border(
                 1.dp,
-                if (isYou) Arena.Gold.copy(alpha = 0.5f) else Arena.Outline.copy(alpha = 0.5f),
+                when {
+                    isYou -> Arena.Gold.copy(alpha = 0.5f)
+                    player.appearance?.banner != null -> Arena.Violet.copy(alpha = 0.65f)
+                    else -> Arena.Outline.copy(alpha = 0.5f)
+                },
                 RoundedCornerShape(14.dp)
             )
             .padding(horizontal = 14.dp, vertical = 12.dp),
@@ -995,7 +1007,11 @@ private fun StandingRow(rank: Int, player: PublicPlayer, isYou: Boolean) {
             modifier = Modifier.width(38.dp)
         )
         Text(
-            text = if (isYou) "${player.name} (you)" else player.name,
+            text = buildString {
+                append(if (isYou) "${player.name} (you)" else player.name)
+                player.appearance?.title?.let { append(" · ${it.displayName}") }
+                player.appearance?.badge?.let { append(" · ${it.displayName}") }
+            },
             style = MaterialTheme.typography.bodyLarge,
             color = Arena.TextHi,
             modifier = Modifier.weight(1f),

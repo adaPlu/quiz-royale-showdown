@@ -71,6 +71,9 @@ select:focus-visible {
 .connection-pill.offline { color: #ff2e63; }
 
 .match-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #a8b2cc; font-size: 0.82rem; }
+.standing-player { display: grid; gap: 4px; min-width: 0; }
+.match-appearance { display: flex; flex-wrap: wrap; gap: 4px; color: #a8b2cc; font-size: 0.66rem; font-style: normal; }
+.match-appearance em { border: 1px solid rgba(124, 92, 255, 0.38); border-radius: 999px; padding: 2px 6px; background: rgba(124, 92, 255, 0.10); color: #c5b8ff; font-style: normal; font-weight: 800; }
 
 .powerup-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
 .powerup-row button { display: inline-flex; align-items: center; gap: 7px; border: 1px solid rgba(255, 176, 32, 0.45); border-radius: 999px; background: rgba(255, 176, 32, 0.09); color: #ffc24b; padding: 8px 12px; font-weight: 800; cursor: pointer; }

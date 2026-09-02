@@ -32,8 +32,8 @@ A custom production web origin may also be deployed through the prepared Cloudfl
 
 ```text
 applicationId: com.rork.quizroyaleshowdown
-versionName:   1.7
-versionCode:   1787428686
+versionName:   1.8
+versionCode:   1787428687
 minSdk:        26
 targetSdk:     36
 compileSdk:    36
@@ -89,10 +89,13 @@ compileSdk:    36
 - Cosmetic unlocks
 - Cosmetic ownership
 - Cosmetic equip state
+- Match-visible equipped frames, banners, titles, and badges
 - Paid Android currency packs through Google Play Billing
 - Server-side Google Play receipt verification
 - Idempotent paid-currency grants
 - Server-side Play consumption after entitlement grant
+- Periodic Voided Purchases reconciliation
+- Authenticated Google Play RTDN Pub/Sub ingestion for low-latency lifecycle signals
 
 ## Cosmetics
 
@@ -887,7 +890,9 @@ Before an Android/public release, verify at minimum:
 - [ ] Live Android multiplayer sanity checked
 - [ ] Google Play products active before paid-currency testing
 - [ ] Railway Google Play service account configured
-- [ ] Voided-purchase reconciliation enabled and migration 009 applied
+- [ ] Voided-purchase reconciliation enabled and migrations 009–011 applied
+- [ ] Season lifecycle reconciliation enabled
+- [ ] RTDN provider configuration verified when RTDN is being enabled
 - [ ] License-tester purchase verified before enabling paid commerce broadly
 
 ---
@@ -913,17 +918,17 @@ For paid coins/gems:
 
 # Known Hardening / Polish Work
 
-The major systems are implemented, but ongoing production hardening still includes:
+The 1.8 release adds automatic season rollover, match-visible cosmetics, safe Redis/PostgreSQL/billing health reporting, and authenticated RTDN ingestion. Remaining production work is narrower:
 
-- optional Real-time Developer Notifications for faster-than-polling purchase lifecycle signals;
-- deeper adversarial commerce integration tests beyond the refund/replay unit coverage;
-- release AAB/R8 validation as a permanent CI gate;
-- more production-quality cosmetic artwork and presentation;
-- additional multiplayer/load testing;
-- balancing and economy tuning;
-- broader observability and alerting.
+- finish Google Play / Pub/Sub provider-side RTDN configuration and matching Railway variables;
+- switch the Railway production source branch from the transitional branch to canonical `main`;
+- deeper adversarial commerce and multiplayer load/soak testing;
+- permanent signed-AAB/R8 release validation in CI;
+- more bespoke cosmetic artwork and animation;
+- external alert delivery for abnormal API, matchmaking, database, and commerce failure rates;
+- ongoing balance, seasonal-content, and trivia-quality tuning.
 
-These items should be treated as release-hardening work rather than evidence that the core architecture is absent.
+These are release-operations and polish tasks rather than missing core architecture.
 
 ---
 
@@ -985,7 +990,7 @@ When making changes:
 3. update tests when behavior changes;
 4. do not commit credentials or generated secrets;
 5. run the relevant local test lanes;
-6. open a PR to `Railway-API-Implementation`;
+6. open a PR to `main`;
 7. inspect CI failures instead of merging around them;
 8. merge only after the affected system graph is green.
 

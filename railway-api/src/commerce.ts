@@ -43,6 +43,31 @@ type GoogleProductPurchase = {
   quantity?: number;
   obfuscatedExternalAccountId?: string;
 };
+type PubSubPushEnvelope = {
+  message?: {
+    data?: string;
+    messageId?: string;
+    publishTime?: string;
+  };
+  subscription?: string;
+};
+type RtdnPayload = {
+  version?: string;
+  packageName?: string;
+  eventTimeMillis?: string;
+  oneTimeProductNotification?: unknown;
+  voidedPurchaseNotification?: unknown;
+  pendingRefundReviewNotification?: unknown;
+  subscriptionNotification?: unknown;
+  testNotification?: unknown;
+};
+type GoogleTokenInfo = {
+  aud?: string;
+  email?: string;
+  email_verified?: string;
+  exp?: string;
+  iss?: string;
+};
 type ServiceAccount = {
   client_email: string;
   private_key: string;
@@ -283,7 +308,8 @@ export async function handleCommerceRequest(
     url.pathname === "/store/currency-packs" ||
     url.pathname === "/store/google-play/verify" ||
     url.pathname === "/internal/billing-status" ||
-    url.pathname === "/internal/google-play/reconcile-voided";
+    url.pathname === "/internal/google-play/reconcile-voided" ||
+    url.pathname === "/google-play/rtdn";
   if (!isCommerceRoute) return false;
 
   const origin = typeof request.headers.origin === "string" ? request.headers.origin.trim().replace(/\/$/, "") : "";
@@ -304,6 +330,10 @@ export async function handleCommerceRequest(
   }
 
   try {
+    if (request.method === "POST" && url.pathname === "/google-play/rtdn") {
+      return finish(response, await handleGooglePlayRtdn(request));
+    }
+
     if (request.method === "GET" && url.pathname === "/internal/billing-status") {
       if (!authorizedInternal(request)) {
         return finish(response, { status: 401, body: { error: "unauthorized" } });
@@ -357,6 +387,113 @@ export async function handleCommerceRequest(
     }
     return finish(response, { status: 500, body: { error: "commerce_internal_error", message: "Purchase verification failed." } });
   }
+}
+
+async function handleGooglePlayRtdn(request: http.IncomingMessage): Promise<ApiResult> {
+  const expectedAudience = process.env.GOOGLE_PLAY_RTDN_AUDIENCE?.trim();
+  const expectedEmail = process.env.GOOGLE_PLAY_RTDN_SERVICE_ACCOUNT_EMAIL?.trim().toLowerCase();
+  if (!expectedAudience || !expectedEmail) {
+    return {
+      status: 503,
+      body: { error: "rtdn_not_configured", message: "Authenticated Google Play RTDN is not configured." },
+    };
+  }
+
+  const authorization = headerValue(request, "authorization")?.trim() ?? "";
+  if (!authorization.startsWith("Bearer ")) {
+    return { status: 401, body: { error: "unauthorized" } };
+  }
+  const token = authorization.slice(7).trim();
+  if (!token || token.length > 16_384) {
+    return { status: 401, body: { error: "unauthorized" } };
+  }
+
+  const identity = await verifyGooglePushToken(token, expectedAudience, expectedEmail);
+  if (!identity) return { status: 401, body: { error: "unauthorized" } };
+
+  const rawEnvelope = await readJson(request);
+  const envelope = rawEnvelope as PubSubPushEnvelope;
+  const messageId = typeof envelope.message?.messageId === "string"
+    ? envelope.message.messageId.trim().slice(0, 200)
+    : "";
+  const encoded = typeof envelope.message?.data === "string" ? envelope.message.data.trim() : "";
+  if (!messageId || !encoded || encoded.length > 32_000) {
+    return { status: 400, body: { error: "invalid_pubsub_message" } };
+  }
+
+  let payload: RtdnPayload;
+  try {
+    const decoded = Buffer.from(encoded, "base64").toString("utf8");
+    payload = JSON.parse(decoded) as RtdnPayload;
+  } catch {
+    return { status: 400, body: { error: "invalid_rtdn_payload" } };
+  }
+
+  if (payload.packageName !== PACKAGE_NAME) {
+    // Authenticated Pub/Sub messages for a different package are acknowledged
+    // but ignored so a subscription mistake cannot create an infinite retry.
+    return { status: 200, body: { ok: true, ignored: "package_mismatch" } };
+  }
+
+  const eventKind = rtdnEventKind(payload);
+
+  const inserted = await pool.query(
+    `INSERT INTO play_rtdn_events(message_id, package_name, event_kind, event_time, received_at)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (message_id) DO NOTHING
+     RETURNING message_id`,
+    [messageId, PACKAGE_NAME, eventKind, parseMillis(payload.eventTimeMillis), Date.now()],
+  );
+  if (!inserted.rowCount) return { status: 200, body: { ok: true, duplicate: true } };
+
+  // RTDN is a low-latency signal, not the source of truth. Re-query Google's
+  // authenticated purchase lifecycle API and let the existing idempotent void
+  // reconciler decide whether any currency must be reversed.
+  await reconcileVoidedPurchases();
+  return { status: 200, body: { ok: true, eventKind } };
+}
+
+export function rtdnEventKind(payload: RtdnPayload): string {
+  if (payload.voidedPurchaseNotification) return "voided_purchase";
+  if (payload.pendingRefundReviewNotification) return "pending_refund_review";
+  if (payload.oneTimeProductNotification) return "one_time_product";
+  if (payload.subscriptionNotification) return "subscription";
+  if (payload.testNotification) return "test";
+  return "unknown";
+}
+
+async function verifyGooglePushToken(
+  token: string,
+  expectedAudience: string,
+  expectedEmail: string,
+): Promise<GoogleTokenInfo | null> {
+  const response = await fetch(
+    `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(token)}`,
+    { headers: { Accept: "application/json" } },
+  ).catch(() => null);
+  if (!response?.ok) return null;
+
+  let claims: GoogleTokenInfo;
+  try {
+    claims = await response.json() as GoogleTokenInfo;
+  } catch {
+    return null;
+  }
+
+  const expiresAt = Number.parseInt(claims.exp ?? "", 10) * 1000;
+  const issuerOk = claims.iss === "https://accounts.google.com" || claims.iss === "accounts.google.com";
+  return claims.aud === expectedAudience &&
+      claims.email?.toLowerCase() === expectedEmail &&
+      claims.email_verified === "true" &&
+      issuerOk &&
+      Number.isFinite(expiresAt) &&
+      expiresAt > Date.now()
+    ? claims
+    : null;
+}
+
+export function googlePlayHealthStatus(): "configured" | "not_configured" {
+  return serviceAccount() ? "configured" : "not_configured";
 }
 
 async function verifyAndGrant(request: http.IncomingMessage, user: CommerceUser): Promise<ApiResult> {

@@ -35,6 +35,12 @@ test("browser socket tickets preserve trusted identity for the assigned room onl
     subjectId: "u-123",
     displayName: "Ada",
     powerUpCharges: 4,
+    appearance: {
+      avatarFrame: { cosmeticId: "frame-neon-violet", displayName: "Neon Violet Frame" },
+      banner: null,
+      title: { cosmeticId: "title-circuit-breaker", displayName: "Circuit Breaker" },
+      badge: null,
+    },
   };
   const ticket = await mintSocketTicket(env, "room-a", "TOURNAMENT", identity, 1_000);
   assert(ticket);
@@ -68,7 +74,18 @@ test("match room target overwrites spoofed client identity query parameters", ()
     "https://worker.example/match/room-a?playerId=attacker&name=Evil&kind=USER&powerUpCharges=999&roomTicket=t&socketTicket=s",
     "room-a",
     "QUICK",
-    { kind: "GUEST", subjectId: "g1001-real", displayName: "Challenger01", powerUpCharges: 2 },
+    {
+      kind: "GUEST",
+      subjectId: "g1001-real",
+      displayName: "Challenger01",
+      powerUpCharges: 2,
+      appearance: {
+        avatarFrame: null,
+        banner: { cosmeticId: "banner-neon-circuit", displayName: "Neon Circuit Banner" },
+        title: null,
+        badge: null,
+      },
+    },
   ));
 
   assert.equal(target.pathname, "/room/room-a");
@@ -77,6 +94,12 @@ test("match room target overwrites spoofed client identity query parameters", ()
   assert.equal(target.searchParams.get("kind"), "GUEST");
   assert.equal(target.searchParams.get("mode"), "QUICK");
   assert.equal(target.searchParams.get("powerUpCharges"), "2");
+  assert.deepEqual(JSON.parse(target.searchParams.get("appearance") ?? "{}"), {
+    avatarFrame: null,
+    banner: { cosmeticId: "banner-neon-circuit", displayName: "Neon Circuit Banner" },
+    title: null,
+    badge: null,
+  });
   assert.equal(target.searchParams.has("roomTicket"), false);
   assert.equal(target.searchParams.has("socketTicket"), false);
 });

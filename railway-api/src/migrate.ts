@@ -37,6 +37,7 @@ const managedTables = new Set([
   "play_purchase_receipts",
   "user_season_passes",
   "play_purchase_voids",
+  "play_rtdn_events",
 ]);
 
 async function main(): Promise<void> {

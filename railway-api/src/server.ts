@@ -15,7 +15,7 @@ import {
   type FieldErrors,
 } from "./auth-core.js";
 import { CATEGORIES, WORLD_BOARD, normalizeBoard } from "./categories.js";
-import { closeCache } from "./cache.js";
+import { cacheHealth, closeCache } from "./cache.js";
 import {
   GUEST_TTL_MS,
   GOOGLE_PLAY_REVIEW_EMAIL,
@@ -65,6 +65,7 @@ import {
   usageReportSchema,
 } from "./question-service.js";
 import { explicitReviewPassword } from "./runtime-config.js";
+import { googlePlayHealthStatus } from "./commerce.js";
 
 const PORT = Number.parseInt(process.env.PORT ?? "8080", 10);
 const PASSWORD_RESET_TTL_MS = 30 * 60 * 1000;
@@ -187,6 +188,18 @@ type CosmeticItemRow = {
   equipped?: boolean;
 };
 
+type MatchAppearanceCosmetic = {
+  cosmeticId: string;
+  displayName: string;
+};
+
+type MatchAppearance = {
+  avatarFrame: MatchAppearanceCosmetic | null;
+  banner: MatchAppearanceCosmetic | null;
+  title: MatchAppearanceCosmetic | null;
+  badge: MatchAppearanceCosmetic | null;
+};
+
 const matchOutcomeSchema = z.object({
   matchId: z.string().min(1),
   subjectKind: z.enum(["USER", "GUEST"]),
@@ -221,7 +234,7 @@ export async function handleRequest(request: http.IncomingMessage, response: htt
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
 
     if (request.method === "GET" && url.pathname === "/health") {
-      return send(response, 200, { ok: true, service: "quiz-royale-api", now: Date.now() });
+      return sendResponse(response, await healthStatus());
     }
 
     if (request.method === "POST" && url.pathname === "/auth/register") return sendResponse(response, await rateLimited(request, "register", () => register(request)));
@@ -294,6 +307,42 @@ async function start(): Promise<void> {
   server.listen(PORT, () => {
     console.log(`quiz-royale-api listening on ${PORT}`);
   });
+}
+
+async function healthStatus(): Promise<ApiResponse> {
+  const now = Date.now();
+  let postgres: "connected" | "error" = "connected";
+  try {
+    await pool.query("SELECT 1");
+  } catch {
+    postgres = "error";
+  }
+
+  const redis = await cacheHealth();
+  const googlePlay = googlePlayHealthStatus();
+  let season: { seasonId: string; endsAt: number } | null = null;
+  if (postgres === "connected") {
+    const current = await getActiveSeason(pool).catch(() => null);
+    if (current) season = { seasonId: current.season_id, endsAt: Number(current.ends_at) };
+  }
+
+  const ok = postgres === "connected";
+  return [ok ? 200 : 503, {
+    ok,
+    service: "quiz-royale-api",
+    now,
+    version: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 12) ?? null,
+    dependencies: {
+      postgres,
+      redis,
+      googlePlay,
+      rtdn: process.env.GOOGLE_PLAY_RTDN_AUDIENCE?.trim() &&
+        process.env.GOOGLE_PLAY_RTDN_SERVICE_ACCOUNT_EMAIL?.trim()
+        ? "configured"
+        : "not_configured",
+    },
+    season,
+  }];
 }
 
 async function register(request: http.IncomingMessage): Promise<ApiResponse> {
@@ -506,6 +555,7 @@ async function resolveUser(request: http.IncomingMessage): Promise<ApiResponse> 
     entitlements,
     currencyBalances: currencyBalancesFor(record),
     powerUpCharges: entitlements.unlimitedCurrency ? REVIEW_ACCOUNT_BALANCE : stats.powerUpCharges,
+    appearance: await equippedMatchAppearance(pool, record.user_id),
   }];
 }
 
@@ -871,6 +921,9 @@ async function purchaseStoreItem(request: http.IncomingMessage): Promise<ApiResp
     if (item.item_type === "SEASON_PASS") {
       const seasonId = storePayloadString(item.payload, "seasonId");
       if (!seasonId) return { status: 409 as const, body: { error: "invalid_item", message: "This season pass is misconfigured." } };
+      if (!await seasonIsCurrent(client, seasonId)) {
+        return { status: 409 as const, body: { error: "season_not_current", message: "That season pass is not currently available." } };
+      }
       if (await hasSeasonPass(client, user.user_id, seasonId, user.entitlements)) {
         return { status: 409 as const, body: { error: "already_owned", message: "You already own this season pass." } };
       }
@@ -1357,12 +1410,21 @@ async function getActiveSeason(db: DbClient): Promise<SeasonRow | null> {
   const result = await db.query<SeasonRow>(
     `SELECT season_id, name, starts_at, ends_at, reward_track
      FROM seasons
-     WHERE active = true AND starts_at <= $1 AND ends_at > $1
-     ORDER BY starts_at DESC
+     WHERE starts_at <= $1 AND ends_at > $1
+     ORDER BY active DESC, starts_at DESC, created_at DESC, season_id
      LIMIT 1`,
     [now],
   );
   return result.rows[0] ?? null;
+}
+
+async function seasonIsCurrent(db: DbClient, seasonId: string): Promise<boolean> {
+  const now = Date.now();
+  const result = await db.query(
+    "SELECT 1 FROM seasons WHERE season_id = $1 AND starts_at <= $2 AND ends_at > $2",
+    [seasonId, now],
+  );
+  return Boolean(result.rowCount);
 }
 
 function seasonDto(row: SeasonRow): SeasonDto {
@@ -1453,7 +1515,13 @@ async function hydrateStoreItems(db: DbClient, record: UserRow): Promise<StoreIt
   );
   const entitlements = normalizeEntitlements(record.entitlements);
   const ownedCosmetics = await ownedCosmeticIds(db, record.user_id);
-  return Promise.all(rows.rows.map(async (row) => {
+  const current = await getActiveSeason(db);
+  const visibleRows = rows.rows.filter((row) => {
+    if (row.item_type !== "SEASON_PASS") return true;
+    const seasonId = storePayloadString(row.payload ?? {}, "seasonId");
+    return Boolean(seasonId && seasonId === current?.season_id);
+  });
+  return Promise.all(visibleRows.map(async (row) => {
     const payload = row.payload ?? {};
     const cosmeticId = storePayloadString(payload, "cosmeticId");
     const seasonId = storePayloadString(payload, "seasonId");
@@ -1553,6 +1621,35 @@ async function hydrateCosmetics(db: DbClient, record: UserRow): Promise<Cosmetic
     owned: unlockAll || row.owned === true,
     equipped: row.equipped === true,
   }));
+}
+
+async function equippedMatchAppearance(db: DbClient, userId: string): Promise<MatchAppearance> {
+  const rows = await db.query<{
+    cosmetic_type: CosmeticItemDto["cosmeticType"];
+    cosmetic_id: string;
+    display_name: string;
+  }>(
+    `SELECT c.cosmetic_type, c.cosmetic_id, c.display_name
+     FROM equipped_cosmetics ec
+     JOIN cosmetic_items c ON c.cosmetic_id = ec.cosmetic_id
+     WHERE ec.user_id = $1 AND c.active = true`,
+    [userId],
+  );
+
+  const appearance: MatchAppearance = {
+    avatarFrame: null,
+    banner: null,
+    title: null,
+    badge: null,
+  };
+  for (const row of rows.rows) {
+    const item = { cosmeticId: row.cosmetic_id, displayName: row.display_name };
+    if (row.cosmetic_type === "avatar_frame") appearance.avatarFrame = item;
+    else if (row.cosmetic_type === "banner") appearance.banner = item;
+    else if (row.cosmetic_type === "title") appearance.title = item;
+    else if (row.cosmetic_type === "badge") appearance.badge = item;
+  }
+  return appearance;
 }
 
 async function getCosmeticItem(db: DbClient, cosmeticId: string): Promise<CosmeticItemRow | null> {

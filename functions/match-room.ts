@@ -23,6 +23,7 @@ import {
   MODE_CONFIG,
   type ClientMessage,
   type GameMode,
+  type MatchAppearance,
   type Phase,
   type PowerUp,
   type PublicMatch,
@@ -66,6 +67,7 @@ type PlayerState = {
   removedOptions: number[];
   spentPowerUps: PowerUp[];
   powerUpCharges: number;
+  appearance: MatchAppearance | null;
   shieldActive: boolean;
   doubleActive: boolean;
 };
@@ -129,6 +131,7 @@ export class MatchRoom extends DurableObject<Env> {
     // so a client cannot claim to be a registered user.
     const subjectKind = parseSubjectKind(url.searchParams.get("kind"));
     const powerUpCharges = clampInt(Number.parseInt(url.searchParams.get("powerUpCharges") ?? "", 10), 0, 99);
+    const appearance = parseAppearance(url.searchParams.get("appearance"));
 
     const state = await this.ensureState(mode);
 
@@ -140,10 +143,12 @@ export class MatchRoom extends DurableObject<Env> {
       existing.name = name || existing.name;
       existing.subjectKind = subjectKind;
       existing.powerUpCharges = powerUpCharges;
+      existing.appearance = appearance;
     } else if (state.phase === "LOBBY" && humanCount(state) < MODE_CONFIG[state.mode].maxPlayers) {
       const player = newPlayer(playerId, name, false, MODE_CONFIG[state.mode].lives);
       player.subjectKind = subjectKind;
       player.powerUpCharges = powerUpCharges;
+      player.appearance = appearance;
       state.players[playerId] = player;
       state.order.push(playerId);
     }
@@ -904,6 +909,7 @@ export class MatchRoom extends DurableObject<Env> {
         hasAnswered: p.answerIndex !== null,
         lastAnswerCorrect: revealed ? p.lastAnswerCorrect : null,
         placement: p.placement,
+        appearance: p.appearance,
       }))
       .sort((a, b) => {
         if (a.alive !== b.alive) return a.alive ? -1 : 1;
@@ -982,6 +988,28 @@ function parseSubjectKind(raw: string | null): SubjectKind | null {
   return raw === "USER" || raw === "GUEST" ? raw : null;
 }
 
+function parseAppearance(raw: string | null): MatchAppearance | null {
+  if (!raw || raw.length > 2_000) return null;
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown>;
+    const slot = (candidate: unknown): { cosmeticId: string; displayName: string } | null => {
+      if (!candidate || typeof candidate !== "object") return null;
+      const record = candidate as Record<string, unknown>;
+      const cosmeticId = typeof record.cosmeticId === "string" ? record.cosmeticId.trim().slice(0, 80) : "";
+      const displayName = typeof record.displayName === "string" ? record.displayName.trim().slice(0, 80) : "";
+      return cosmeticId && displayName ? { cosmeticId, displayName } : null;
+    };
+    return {
+      avatarFrame: slot(value.avatarFrame),
+      banner: slot(value.banner),
+      title: slot(value.title),
+      badge: slot(value.badge),
+    };
+  } catch {
+    return null;
+  }
+}
+
 function newPlayer(id: string, name: string, isBot: boolean, lives: number): PlayerState {
   return {
     id,
@@ -1005,6 +1033,7 @@ function newPlayer(id: string, name: string, isBot: boolean, lives: number): Pla
     removedOptions: [],
     spentPowerUps: [],
     powerUpCharges: 0,
+    appearance: null,
     shieldActive: false,
     doubleActive: false,
   };

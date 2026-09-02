@@ -14,7 +14,7 @@ import {
   type DoClassName,
   type DoEnv,
 } from "./do-dispatch";
-import { MODE_CONFIG, type GameMode } from "./protocol";
+import type { GameMode, MatchAppearance } from "./protocol";
 import type { GuestSessionDto, SubjectKind } from "./identity";
 import { callRailwayJson } from "./railway-api";
 import { buildMatchRoomTargetUrl } from "./match-routing";
@@ -107,23 +107,16 @@ async function handleMatchmake(request: Request, env: Env, url: URL): Promise<Re
   const mode = parseMode(url.searchParams.get("mode"));
   const cors = corsHeaders(request, env);
 
-  if (mode === "PRACTICE") {
-    const roomId = `practice-${crypto.randomUUID()}-${Date.now().toString(36)}`;
-    const roomTicket = await mintRoomTicket(env, roomId, mode);
-    if (!roomTicket) return Response.json({ error: "match_tickets_unavailable" }, { status: 503, headers: cors });
-    return Response.json(
-      {
-        roomId,
-        roomTicket,
-        mode,
-        playersWaiting: 1,
-        lobbyEndsAt: Date.now() + MODE_CONFIG.PRACTICE.lobbyMs,
-      },
-      { headers: cors },
-    );
-  }
-
-  const response = await dispatchToDo(env, "Matchmaker", mode, request);
+  const matchmakeHeaders = new Headers(request.headers);
+  // This header is Worker-internal control input for rate-only checks. Never
+  // allow a caller to turn a normal matchmaking request into that control path.
+  matchmakeHeaders.delete("X-Quiz-Rate-Limit-Only");
+  const response = await dispatchToDo(
+    env,
+    "Matchmaker",
+    mode,
+    new Request(request, { headers: matchmakeHeaders }),
+  );
   if (!response.ok) {
     const headers = new Headers(cors);
     headers.set("Content-Type", "application/json");
@@ -158,6 +151,26 @@ async function handleWebSocketTicket(request: Request, env: Env): Promise<Respon
   if (!roomId || !roomTicket) {
     return Response.json({ error: "invalid_socket_ticket_request" }, { status: 400, headers: cors });
   }
+
+  // Socket-ticket exchange is an authenticated, relatively expensive path.
+  // Reuse the mode Matchmaker Durable Object as a distributed per-IP limiter
+  // without touching its lobby bucket.
+  const limiterHeaders = new Headers(request.headers);
+  limiterHeaders.set("X-Quiz-Rate-Limit-Only", "socket-ticket");
+  const limiter = await dispatchToDo(
+    env,
+    "Matchmaker",
+    mode,
+    new Request(`https://do.internal/rate-limit?mode=${mode}`, { headers: limiterHeaders }),
+  );
+  if (limiter.status === 429) {
+    const headers = new Headers(cors);
+    const retryAfter = limiter.headers.get("Retry-After");
+    if (retryAfter) headers.set("Retry-After", retryAfter);
+    headers.set("Content-Type", "application/json");
+    return new Response(limiter.body, { status: 429, headers });
+  }
+
   if (!(await verifyRoomTicket(env, roomTicket, roomId, mode))) {
     return Response.json({ error: "invalid_match_room_ticket" }, { status: 403, headers: cors });
   }
@@ -177,6 +190,7 @@ type ResolvedIdentity = {
   subjectId: string;
   displayName: string;
   powerUpCharges: number;
+  appearance: MatchAppearance | null;
 };
 
 async function handleMatchSocket(
@@ -207,7 +221,7 @@ async function handleMatchSocket(
 async function resolveIdentity(env: Env, request: Request, url: URL): Promise<ResolvedIdentity | null> {
   const token = bearer(request);
   if (token) {
-    const railway = await callRailwayJson<{ userId: string; username: string; powerUpCharges: number }>(
+    const railway = await callRailwayJson<{ userId: string; username: string; powerUpCharges: number; appearance?: MatchAppearance | null }>(
       env,
       "/auth/resolve",
       { token },
@@ -218,6 +232,7 @@ async function resolveIdentity(env: Env, request: Request, url: URL): Promise<Re
         subjectId: railway.userId,
         displayName: railway.username,
         powerUpCharges: railway.powerUpCharges,
+        appearance: railway.appearance ?? null,
       };
     }
 
@@ -237,6 +252,7 @@ async function resolveIdentity(env: Env, request: Request, url: URL): Promise<Re
         subjectId: body.userId,
         displayName: body.username,
         powerUpCharges: body.powerUpCharges ?? 0,
+        appearance: null,
       };
     }
   }
@@ -255,6 +271,7 @@ async function resolveIdentity(env: Env, request: Request, url: URL): Promise<Re
         subjectId: railway.guestId,
         displayName: railway.displayName,
         powerUpCharges: railway.powerUpCharges,
+        appearance: null,
       };
     }
 
@@ -278,6 +295,7 @@ async function resolveIdentity(env: Env, request: Request, url: URL): Promise<Re
         subjectId: body.guestId,
         displayName: body.displayName,
         powerUpCharges: body.powerUpCharges ?? 0,
+        appearance: null,
       };
     }
   }
@@ -296,6 +314,7 @@ async function resolveIdentity(env: Env, request: Request, url: URL): Promise<Re
       subjectId: railwayGuest.guest.guestId,
       displayName: railwayGuest.guest.displayName,
       powerUpCharges: railwayGuest.guest.stats.powerUpCharges,
+      appearance: null,
     };
   }
 
@@ -317,6 +336,7 @@ async function resolveIdentity(env: Env, request: Request, url: URL): Promise<Re
     subjectId: body.guest.guestId,
     displayName: body.guest.displayName,
     powerUpCharges: body.guest.stats.powerUpCharges,
+    appearance: null,
   };
 }
 

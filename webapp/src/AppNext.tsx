@@ -44,6 +44,7 @@ import type {
   MatchmakeResponse,
   PowerUp,
   PublicMatch,
+  PublicPlayer,
   ServerMessage,
   StoreItemsEnvelope,
   YouState,
@@ -428,9 +429,57 @@ function SeasonScreen({ identity }: { identity: Identity }) {
   const [error, setError] = useState<string | null>(null);
   useEffect(() => { setSeason(null); setError(null); loadSeason(identity).then(setSeason).catch((e: Error) => setError(e.message)); }, [identity]);
   if (identity.kind === "guest") return <LockedPage title="SEASON" message="Register or sign in to track seasonal XP and rewards." />;
+
   const progress = season?.progress;
   const levelProgress = progress ? (progress.xp % 1000) / 10 : 0;
-  return <ArenaPage title="SEASON" subtitle="Climb the current reward track">{error && <InlineError>{error}</InlineError>}{!season && !error && <p className="muted" aria-live="polite">Loading season…</p>}{season && <><section className="arena-card season-hero"><Sparkles className="violet-text" size={34} aria-hidden="true" /><div><p className="eyebrow">CURRENT SEASON</p><h2>{season.season.name}</h2></div></section><section className="arena-card"><div className="season-level"><strong>LEVEL {progress?.level}</strong><span>{progress?.xp} XP</span></div><div className="progress" role="progressbar" aria-valuenow={levelProgress} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${levelProgress}%` }} /></div><p className="muted">Tickets earned: {progress?.ticketsEarned ?? 0}</p></section></>}</ArenaPage>;
+  const daysLeft = season ? Math.max(0, Math.ceil((season.season.endsAt - Date.now()) / 86_400_000)) : 0;
+
+  return (
+    <ArenaPage title="SEASON" subtitle="Climb the current reward track">
+      {error && <InlineError>{error}</InlineError>}
+      {!season && !error && <p className="muted" aria-live="polite">Loading season…</p>}
+      {season && (
+        <>
+          <section className="arena-card season-hero">
+            <Sparkles className="violet-text" size={34} aria-hidden="true" />
+            <div>
+              <p className="eyebrow">CURRENT SEASON · {daysLeft} DAYS LEFT</p>
+              <h2>{season.season.name}</h2>
+              <small>{season.hasSeasonPass ? "Premium pass active" : "Free reward track"}</small>
+            </div>
+          </section>
+          <section className="arena-card">
+            <div className="season-level"><strong>LEVEL {progress?.level}</strong><span>{progress?.xp} XP</span></div>
+            <div className="progress" role="progressbar" aria-valuenow={levelProgress} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${levelProgress}%` }} /></div>
+            <p className="muted">Tickets earned: {progress?.ticketsEarned ?? 0} · {1000 - ((progress?.xp ?? 0) % 1000)} XP to next level</p>
+          </section>
+          <section className="season-track" aria-label="Season reward milestones">
+            {season.season.rewardTrack.map((reward, index) => {
+              const level = Number(reward.level ?? 1);
+              const premium = reward.premium === true;
+              const reached = (progress?.level ?? 1) >= level;
+              const unlocked = reached && (!premium || season.hasSeasonPass === true);
+              return (
+                <article className={unlocked ? "arena-card season-reward unlocked" : "arena-card season-reward"} key={`${level}-${index}`}>
+                  <div><strong>LEVEL {level}</strong>{premium && <em>PREMIUM</em>}</div>
+                  <span>{seasonRewardText(reward)}</span>
+                  <small>{unlocked ? "EARNED" : reached && premium ? "PASS REQUIRED" : "LOCKED"}</small>
+                </article>
+              );
+            })}
+          </section>
+        </>
+      )}
+    </ArenaPage>
+  );
+}
+
+function seasonRewardText(reward: Record<string, unknown>): string {
+  const parts: string[] = [];
+  if (Number(reward.coins) > 0) parts.push(`${Number(reward.coins)} coins`);
+  if (Number(reward.gems) > 0) parts.push(`${Number(reward.gems)} gems`);
+  if (Number(reward.seasonalTickets) > 0) parts.push(`${Number(reward.seasonalTickets)} bonus tickets`);
+  return parts.length > 0 ? parts.join(" · ") : "Mystery reward";
 }
 
 function ProfileScreen({ identity, onIdentity, onMessage }: { identity: Identity; onIdentity: (identity: Identity) => void; onMessage: (message: string | null) => void }) {
@@ -464,7 +513,20 @@ function MatchScreen({ live, socket, connectionState, onExit }: { live: LiveMatc
     window.addEventListener("keydown", keyHandler); return () => window.removeEventListener("keydown", keyHandler);
   });
   const resultText = match.phase === "REVEAL" && you.answerIndex != null ? you.answerIndex === match.correctIndex ? "Correct!" : "Not this round." : null;
-  return <div className="match-page"><div className="match-topbar"><button onClick={onExit}>← EXIT</button><strong>{match.mode}</strong><span className={`connection-pill ${connectionState}`} aria-live="polite">{connectionState === "live" ? <Wifi size={15} aria-hidden="true" /> : <WifiOff size={15} aria-hidden="true" />}{connectionState === "reconnecting" ? "RECONNECTING" : connectionState === "live" ? `${match.phase === "FINISHED" ? "FINAL" : `${seconds}s`}` : connectionState.toUpperCase()}</span></div><div className="phase-timer" aria-hidden="true"><span style={{ width: `${timerPercent}%` }} /></div><div className="match-content"><div className="match-meta"><p className="eyebrow">ROUND {match.roundNumber} / {match.totalRounds}</p><span>{you.score} pts · streak {you.streak} · lives {you.lives}</span></div>{match.phase === "LOBBY" && <h1>Entering the arena…</h1>}{match.question && <><p className="category">{match.question.category} · {match.question.difficulty}</p><h1 className="question">{match.question.text}</h1>{you.availablePowerUps.length > 0 && match.phase === "QUESTION" && <div className="powerup-row" aria-label="Available power-ups">{you.availablePowerUps.map((powerUp) => <button key={powerUp} onClick={() => usePowerUp(powerUp)} disabled={socket?.readyState !== WebSocket.OPEN}>{powerUp === "SHIELD" ? <Shield size={17} aria-hidden="true" /> : powerUp === "DOUBLE_DOWN" ? <Zap size={17} aria-hidden="true" /> : <Sparkles size={17} aria-hidden="true" />}{powerUpLabel(powerUp)}</button>)}</div>}<div className="answer-grid">{match.question.options.map((option, index) => { const removed = you.removedOptions.includes(index); const selected = you.answerIndex === index; const correct = match.phase === "REVEAL" && match.correctIndex === index; const wrongSelected = match.phase === "REVEAL" && selected && !correct; return <button key={`${match.question?.id}-${index}`} className={`answer ${selected ? "selected" : ""} ${correct ? "correct" : ""} ${wrongSelected ? "wrong" : ""}`} disabled={removed || you.answerIndex != null || match.phase !== "QUESTION"} onClick={() => answer(index)} aria-pressed={selected} aria-label={`Answer ${index + 1}: ${removed ? "removed" : option}`}><span>{String.fromCharCode(65 + index)}</span>{removed ? "—" : option}</button>; })}</div>{resultText && <p className={resultText === "Correct!" ? "answer-result correct-text" : "answer-result wrong-text"} role="status">{resultText}</p>}</>}<section className="arena-card standings" aria-labelledby="standings-title"><div className="season-level"><strong id="standings-title">STANDINGS</strong><span>{match.aliveCount} alive</span></div>{sortedPlayers.slice(0, 8).map((player, index) => <div className={player.id === you.playerId ? "standing you" : "standing"} key={player.id}><span>#{player.placement ?? index + 1} {player.name}{!player.alive ? " · OUT" : ""}</span><strong>{player.score}</strong></div>)}</section>{match.phase === "FINISHED" && <section className="finish-card"><Crown aria-hidden="true" /><h2>{match.winnerId === you.playerId ? "YOU WON" : `PLACEMENT #${you.placement ?? "—"}`}</h2><p>{you.score} final points</p><button className="primary-button" onClick={onExit}>RETURN HOME</button></section>}<p className="keyboard-hint">Keyboard: 1–4 answers · Esc exits</p></div></div>;
+  return <div className="match-page"><div className="match-topbar"><button onClick={onExit}>← EXIT</button><strong>{match.mode}</strong><span className={`connection-pill ${connectionState}`} aria-live="polite">{connectionState === "live" ? <Wifi size={15} aria-hidden="true" /> : <WifiOff size={15} aria-hidden="true" />}{connectionState === "reconnecting" ? "RECONNECTING" : connectionState === "live" ? `${match.phase === "FINISHED" ? "FINAL" : `${seconds}s`}` : connectionState.toUpperCase()}</span></div><div className="phase-timer" aria-hidden="true"><span style={{ width: `${timerPercent}%` }} /></div><div className="match-content"><div className="match-meta"><p className="eyebrow">ROUND {match.roundNumber} / {match.totalRounds}</p><span>{you.score} pts · streak {you.streak} · lives {you.lives}</span></div>{match.phase === "LOBBY" && <h1>Entering the arena…</h1>}{match.question && <><p className="category">{match.question.category} · {match.question.difficulty}</p><h1 className="question">{match.question.text}</h1>{you.availablePowerUps.length > 0 && match.phase === "QUESTION" && <div className="powerup-row" aria-label="Available power-ups">{you.availablePowerUps.map((powerUp) => <button key={powerUp} onClick={() => usePowerUp(powerUp)} disabled={socket?.readyState !== WebSocket.OPEN}>{powerUp === "SHIELD" ? <Shield size={17} aria-hidden="true" /> : powerUp === "DOUBLE_DOWN" ? <Zap size={17} aria-hidden="true" /> : <Sparkles size={17} aria-hidden="true" />}{powerUpLabel(powerUp)}</button>)}</div>}<div className="answer-grid">{match.question.options.map((option, index) => { const removed = you.removedOptions.includes(index); const selected = you.answerIndex === index; const correct = match.phase === "REVEAL" && match.correctIndex === index; const wrongSelected = match.phase === "REVEAL" && selected && !correct; return <button key={`${match.question?.id}-${index}`} className={`answer ${selected ? "selected" : ""} ${correct ? "correct" : ""} ${wrongSelected ? "wrong" : ""}`} disabled={removed || you.answerIndex != null || match.phase !== "QUESTION"} onClick={() => answer(index)} aria-pressed={selected} aria-label={`Answer ${index + 1}: ${removed ? "removed" : option}`}><span>{String.fromCharCode(65 + index)}</span>{removed ? "—" : option}</button>; })}</div>{resultText && <p className={resultText === "Correct!" ? "answer-result correct-text" : "answer-result wrong-text"} role="status">{resultText}</p>}</>}<section className="arena-card standings" aria-labelledby="standings-title"><div className="season-level"><strong id="standings-title">STANDINGS</strong><span>{match.aliveCount} alive</span></div>{sortedPlayers.slice(0, 8).map((player, index) => <div className={player.id === you.playerId ? "standing you" : "standing"} key={player.id}><span className="standing-player">#{player.placement ?? index + 1} {player.name}{!player.alive ? " · OUT" : ""}<MatchAppearanceTags player={player} /></span><strong>{player.score}</strong></div>)}</section>{match.phase === "FINISHED" && <section className="finish-card"><Crown aria-hidden="true" /><h2>{match.winnerId === you.playerId ? "YOU WON" : `PLACEMENT #${you.placement ?? "—"}`}</h2><p>{you.score} final points</p><button className="primary-button" onClick={onExit}>RETURN HOME</button></section>}<p className="keyboard-hint">Keyboard: 1–4 answers · Esc exits</p></div></div>;
+}
+
+function MatchAppearanceTags({ player }: { player: PublicPlayer }) {
+  const appearance = player.appearance;
+  if (!appearance) return null;
+  const tags = [
+    appearance.title?.displayName,
+    appearance.badge?.displayName,
+    appearance.avatarFrame?.displayName,
+    appearance.banner?.displayName,
+  ].filter((value): value is string => Boolean(value));
+  if (tags.length === 0) return null;
+  return <small className="match-appearance" aria-label={`Equipped cosmetics: ${tags.join(", ")}`}>{tags.map((tag) => <em key={tag}>{tag}</em>)}</small>;
 }
 
 function powerUpLabel(powerUp: PowerUp): string { if (powerUp === "FIFTY_FIFTY") return "50:50"; if (powerUp === "DOUBLE_DOWN") return "Double"; return "Shield"; }

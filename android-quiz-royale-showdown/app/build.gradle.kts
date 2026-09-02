@@ -39,8 +39,8 @@ android {
         applicationId = "com.rork.quizroyaleshowdown"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1787428686
-        versionName = "1.7"
+        versionCode = 1787428687
+        versionName = "1.8"
         buildConfigField("String", "EXPO_PUBLIC_RAILWAY_API_URL", railwayApiUrl.toBuildConfigLiteral())
         buildConfigField("String", "EXPO_PUBLIC_RORK_FUNCTIONS_URL", rorkFunctionsUrl.toBuildConfigLiteral())
     }

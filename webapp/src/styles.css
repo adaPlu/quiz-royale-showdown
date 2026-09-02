@@ -133,6 +133,15 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--gold-bright
 .season-level span { color: var(--text-mid); }
 .progress { height: 9px; border-radius: 999px; overflow: hidden; background: var(--outline); margin: 12px 0; }
 .progress span { display: block; height: 100%; background: linear-gradient(90deg, var(--violet), var(--gold)); border-radius: inherit; }
+.season-track { display: grid; gap: 10px; margin-top: 14px; }
+.season-reward { display: grid; grid-template-columns: minmax(96px, auto) 1fr auto; align-items: center; gap: 12px; }
+.season-reward > div { display: flex; align-items: center; gap: 7px; }
+.season-reward em { border: 1px solid color-mix(in srgb, var(--violet) 50%, transparent); border-radius: 999px; padding: 2px 6px; color: var(--violet); font-size: 0.62rem; font-style: normal; font-weight: 900; }
+.season-reward > span { color: var(--text-mid); }
+.season-reward > small { color: var(--text-low); font-weight: 900; }
+.season-reward.unlocked { border-color: color-mix(in srgb, var(--gold) 55%, var(--outline)); }
+.season-reward.unlocked > small { color: var(--gold-bright); }
+@media (max-width: 620px) { .season-reward { grid-template-columns: 1fr auto; } .season-reward > span { grid-column: 1 / -1; } }
 
 .locked-card { text-align: center; padding: 34px 20px; }
 .locked-card svg { color: var(--gold); }

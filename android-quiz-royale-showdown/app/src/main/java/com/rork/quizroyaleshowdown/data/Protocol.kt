@@ -41,6 +41,20 @@ data class PublicQuestion(
 )
 
 @Serializable
+data class MatchAppearanceCosmetic(
+    val cosmeticId: String,
+    val displayName: String
+)
+
+@Serializable
+data class MatchAppearance(
+    val avatarFrame: MatchAppearanceCosmetic? = null,
+    val banner: MatchAppearanceCosmetic? = null,
+    val title: MatchAppearanceCosmetic? = null,
+    val badge: MatchAppearanceCosmetic? = null
+)
+
+@Serializable
 data class PublicPlayer(
     val id: String,
     val name: String,
@@ -51,7 +65,8 @@ data class PublicPlayer(
     val lives: Int,
     val hasAnswered: Boolean,
     val lastAnswerCorrect: Boolean? = null,
-    val placement: Int? = null
+    val placement: Int? = null,
+    val appearance: MatchAppearance? = null
 )
 
 @Serializable

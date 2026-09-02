@@ -2,6 +2,7 @@ import http from "node:http";
 import { closeCache } from "./cache.js";
 import { handleCommerceRequest, startGooglePlayVoidedPurchaseReconciler } from "./commerce.js";
 import { pool } from "./db.js";
+import { startSeasonLifecycleReconciler } from "./season-lifecycle.js";
 import { handleRequest } from "./server.js";
 
 const PORT = Number.parseInt(process.env.PORT ?? "8080", 10);
@@ -12,6 +13,7 @@ export const appServer = http.createServer(async (request, response) => {
 });
 
 const stopVoidedPurchaseReconciler = startGooglePlayVoidedPurchaseReconciler();
+const stopSeasonLifecycleReconciler = startSeasonLifecycleReconciler();
 
 appServer.listen(PORT, () => {
   console.log(`quiz-royale-api listening on ${PORT}`);
@@ -19,6 +21,7 @@ appServer.listen(PORT, () => {
 
 process.on("SIGTERM", () => {
   stopVoidedPurchaseReconciler();
+  stopSeasonLifecycleReconciler();
   appServer.close(() => {
     Promise.all([pool.end(), closeCache()]).finally(() => process.exit(0));
   });
