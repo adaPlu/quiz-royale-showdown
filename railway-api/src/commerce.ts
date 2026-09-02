@@ -51,15 +51,60 @@ type PubSubPushEnvelope = {
   };
   subscription?: string;
 };
-type RtdnPayload = {
+type PendingRefundReviewNotification = {
+  version?: string;
+  pendingRefundToken?: string;
+  orderId?: string;
+  refundReason?: number;
+  obfuscatedAccountId?: string;
+  obfuscatedProfileId?: string;
+};
+export type RtdnPayload = {
   version?: string;
   packageName?: string;
   eventTimeMillis?: string;
   oneTimeProductNotification?: unknown;
   voidedPurchaseNotification?: unknown;
-  pendingRefundReviewNotification?: unknown;
+  pendingRefundReviewNotification?: PendingRefundReviewNotification;
   subscriptionNotification?: unknown;
   testNotification?: unknown;
+};
+type RefundPreference = "APPROVE" | "DECLINE" | "NEUTRAL";
+type ConsumptionUsageEvent = {
+  obfuscatedAccountId?: string;
+  obfuscatedProfileId?: string;
+  consumptionTime?: string;
+  ipAddress?: string;
+  consumptionItemDescription?: string;
+  location?: {
+    regionCode: string;
+    administrativeArea?: string;
+    locality?: string;
+    sublocality?: string;
+  };
+};
+type PendingRefundReviewRow = {
+  pending_refund_token: string;
+  review_id: string;
+  order_id: string;
+  refund_reason: number | null;
+  obfuscated_account_id: string | null;
+  obfuscated_profile_id: string | null;
+  event_time: string | number | null;
+  received_at: string | number;
+  deadline_at: string | number;
+  status: "PENDING" | "SUBMITTING" | "FAILED" | "COMPLETED";
+  decision: RefundPreference | null;
+  sample_content_provided: boolean | null;
+  consumption_percentage_milliunits: number | null;
+  consumption_usage_events: unknown;
+  submit_attempts: number;
+  google_status: number | null;
+  google_response: unknown;
+  last_attempt_at: string | number | null;
+  completed_at: string | number | null;
+  last_alert_at: string | number | null;
+  updated_at: string | number;
 };
 type GoogleTokenInfo = {
   aud?: string;
@@ -100,6 +145,10 @@ const DEFAULT_ORIGINS = new Set([
 const PAGES_HOST = "quiz-royale-showdown.pages.dev";
 const VOIDED_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000;
 const DEFAULT_VOIDED_RECONCILE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const REFUND_REVIEW_WINDOW_MS = 24 * 60 * 60 * 1000;
+const REFUND_REVIEW_ALERT_THRESHOLD_MS = 4 * 60 * 60 * 1000;
+const REFUND_REVIEW_ALERT_REPEAT_MS = 60 * 60 * 1000;
+const DEFAULT_REFUND_REVIEW_ALERT_INTERVAL_MS = 15 * 60 * 1000;
 
 let accessTokenCache: { token: string; expiresAt: number } | null = null;
 
@@ -128,6 +177,72 @@ export function startGooglePlayVoidedPurchaseReconciler(): () => void {
     clearTimeout(initial);
     clearInterval(timer);
   };
+}
+
+export function startGooglePlayPendingRefundReviewAlerting(): () => void {
+  if (process.env.NODE_ENV === "test" || process.env.GOOGLE_PLAY_REFUND_REVIEW_ALERTS === "false") {
+    return () => undefined;
+  }
+
+  const configured = Number.parseInt(process.env.GOOGLE_PLAY_REFUND_REVIEW_ALERT_INTERVAL_MS ?? "", 10);
+  const intervalMs = Number.isFinite(configured) && configured >= 60_000
+    ? configured
+    : DEFAULT_REFUND_REVIEW_ALERT_INTERVAL_MS;
+
+  const run = () => {
+    alertPendingRefundReviews().catch((error) => {
+      console.error("Google Play pending refund review alert check failed", (error as Error)?.message);
+    });
+  };
+
+  const initial = setTimeout(run, 45_000);
+  initial.unref?.();
+  const timer = setInterval(run, intervalMs);
+  timer.unref?.();
+
+  return () => {
+    clearTimeout(initial);
+    clearInterval(timer);
+  };
+}
+
+async function alertPendingRefundReviews(now = Date.now()): Promise<void> {
+  const rows = await pool.query<Pick<PendingRefundReviewRow, "review_id" | "order_id" | "deadline_at" | "status">>(
+    `SELECT review_id, order_id, deadline_at, status
+     FROM play_pending_refund_reviews
+     WHERE status <> 'COMPLETED'
+       AND deadline_at <= $1
+       AND (last_alert_at IS NULL OR last_alert_at <= $2)
+     ORDER BY deadline_at ASC
+     LIMIT 100`,
+    [now + REFUND_REVIEW_ALERT_THRESHOLD_MS, now - REFUND_REVIEW_ALERT_REPEAT_MS],
+  );
+
+  for (const row of rows.rows) {
+    const deadlineAt = Number(row.deadline_at);
+    const state = refundReviewDeadlineState(deadlineAt, now);
+    if (state === "overdue") {
+      console.error("Google Play pending refund review requires operator attention", {
+        reviewId: row.review_id,
+        orderId: row.order_id,
+        status: row.status,
+        deadlineAt,
+        deadlineState: state,
+      });
+    } else {
+      console.warn("Google Play pending refund review requires operator attention", {
+        reviewId: row.review_id,
+        orderId: row.order_id,
+        status: row.status,
+        deadlineAt,
+        deadlineState: state,
+      });
+    }
+    await pool.query(
+      "UPDATE play_pending_refund_reviews SET last_alert_at = $2, updated_at = GREATEST(updated_at, $2) WHERE review_id = $1",
+      [row.review_id, now],
+    );
+  }
 }
 
 export async function reconcileVoidedPurchases(now = Date.now()): Promise<Record<string, unknown>> {
@@ -309,6 +424,8 @@ export async function handleCommerceRequest(
     url.pathname === "/store/google-play/verify" ||
     url.pathname === "/internal/billing-status" ||
     url.pathname === "/internal/google-play/reconcile-voided" ||
+    url.pathname === "/internal/google-play/pending-refund-reviews" ||
+    url.pathname === "/internal/google-play/review-refund" ||
     url.pathname === "/google-play/rtdn";
   if (!isCommerceRoute) return false;
 
@@ -346,6 +463,20 @@ export async function handleCommerceRequest(
         return finish(response, { status: 401, body: { error: "unauthorized" } });
       }
       return finish(response, { status: 200, body: await reconcileVoidedPurchases() });
+    }
+
+    if (request.method === "GET" && url.pathname === "/internal/google-play/pending-refund-reviews") {
+      if (!authorizedInternal(request)) {
+        return finish(response, { status: 401, body: { error: "unauthorized" } });
+      }
+      return finish(response, { status: 200, body: await listPendingRefundReviews() });
+    }
+
+    if (request.method === "POST" && url.pathname === "/internal/google-play/review-refund") {
+      if (!authorizedInternal(request)) {
+        return finish(response, { status: 401, body: { error: "unauthorized" } });
+      }
+      return finish(response, await submitPendingRefundReview(request));
     }
 
     if (request.method === "GET" && url.pathname === "/store/currency-packs") {
@@ -436,21 +567,24 @@ async function handleGooglePlayRtdn(request: http.IncomingMessage): Promise<ApiR
   }
 
   const eventKind = rtdnEventKind(payload);
+  if (eventKind === "pending_refund_review" && !normalizePendingRefundReview(payload.pendingRefundReviewNotification)) {
+    return { status: 400, body: { error: "invalid_pending_refund_review" } };
+  }
 
-  const inserted = await pool.query(
-    `INSERT INTO play_rtdn_events(message_id, package_name, event_kind, event_time, received_at)
-     VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT (message_id) DO NOTHING
-     RETURNING message_id`,
-    [messageId, PACKAGE_NAME, eventKind, parseMillis(payload.eventTimeMillis), Date.now()],
-  );
-  if (!inserted.rowCount) return { status: 200, body: { ok: true, duplicate: true } };
+  const recorded = await recordRtdnEvent(messageId, payload);
+  if (recorded.duplicate) return { status: 200, body: { ok: true, duplicate: true } };
 
-  // RTDN is a low-latency signal, not the source of truth. Re-query Google's
-  // authenticated purchase lifecycle API and let the existing idempotent void
-  // reconciler decide whether any currency must be reversed.
-  await reconcileVoidedPurchases();
-  return { status: 200, body: { ok: true, eventKind } };
+  // A pending refund review is not yet a voided purchase. Queue it for an
+  // explicit operator decision instead of acknowledging it as if the outcome
+  // were already final. Other purchase lifecycle signals retain the existing
+  // authenticated voided-purchase reconciliation behavior.
+  if (eventKind !== "pending_refund_review" && eventKind !== "test") {
+    await reconcileVoidedPurchases();
+  }
+  return {
+    status: 200,
+    body: { ok: true, eventKind, ...(recorded.reviewId ? { reviewId: recorded.reviewId } : {}) },
+  };
 }
 
 export function rtdnEventKind(payload: RtdnPayload): string {
@@ -460,6 +594,413 @@ export function rtdnEventKind(payload: RtdnPayload): string {
   if (payload.subscriptionNotification) return "subscription";
   if (payload.testNotification) return "test";
   return "unknown";
+}
+
+export async function recordRtdnEvent(
+  messageId: string,
+  payload: RtdnPayload,
+  receivedAt = Date.now(),
+): Promise<{ duplicate: boolean; eventKind: string; reviewId?: string }> {
+  const eventKind = rtdnEventKind(payload);
+  const eventTime = parseMillis(payload.eventTimeMillis);
+
+  return tx(async (client) => {
+    const inserted = await client.query(
+      `INSERT INTO play_rtdn_events(message_id, package_name, event_kind, event_time, received_at)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (message_id) DO NOTHING
+       RETURNING message_id`,
+      [messageId, PACKAGE_NAME, eventKind, eventTime, receivedAt],
+    );
+    if (!inserted.rowCount) return { duplicate: true, eventKind };
+
+    if (eventKind !== "pending_refund_review") return { duplicate: false, eventKind };
+    const pending = normalizePendingRefundReview(payload.pendingRefundReviewNotification);
+    if (!pending) throw new Error("invalid pending refund review payload");
+
+    const reviewId = `refund-${sha256(pending.pendingRefundToken).slice(0, 32)}`;
+    const deadlineBase = eventTime && eventTime <= receivedAt + 5 * 60 * 1000 ? eventTime : receivedAt;
+    const deadlineAt = deadlineBase + REFUND_REVIEW_WINDOW_MS;
+
+    await client.query(
+      `INSERT INTO play_pending_refund_reviews(
+         pending_refund_token, review_id, order_id, refund_reason,
+         obfuscated_account_id, obfuscated_profile_id, event_time,
+         received_at, deadline_at, status, updated_at
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING', $8)
+       ON CONFLICT (pending_refund_token)
+       DO UPDATE SET
+         order_id = EXCLUDED.order_id,
+         refund_reason = COALESCE(EXCLUDED.refund_reason, play_pending_refund_reviews.refund_reason),
+         obfuscated_account_id = COALESCE(EXCLUDED.obfuscated_account_id, play_pending_refund_reviews.obfuscated_account_id),
+         obfuscated_profile_id = COALESCE(EXCLUDED.obfuscated_profile_id, play_pending_refund_reviews.obfuscated_profile_id),
+         event_time = COALESCE(LEAST(play_pending_refund_reviews.event_time, EXCLUDED.event_time), play_pending_refund_reviews.event_time, EXCLUDED.event_time),
+         received_at = LEAST(play_pending_refund_reviews.received_at, EXCLUDED.received_at),
+         deadline_at = LEAST(play_pending_refund_reviews.deadline_at, EXCLUDED.deadline_at),
+         updated_at = GREATEST(play_pending_refund_reviews.updated_at, EXCLUDED.updated_at)`,
+      [
+        pending.pendingRefundToken,
+        reviewId,
+        pending.orderId,
+        pending.refundReason,
+        pending.obfuscatedAccountId,
+        pending.obfuscatedProfileId,
+        eventTime,
+        receivedAt,
+        deadlineAt,
+      ],
+    );
+
+    return { duplicate: false, eventKind, reviewId };
+  });
+}
+
+function normalizePendingRefundReview(
+  raw: PendingRefundReviewNotification | undefined,
+): {
+  pendingRefundToken: string;
+  orderId: string;
+  refundReason: number | null;
+  obfuscatedAccountId: string | null;
+  obfuscatedProfileId: string | null;
+} | null {
+  if (!raw || typeof raw !== "object") return null;
+  const pendingRefundToken = typeof raw.pendingRefundToken === "string" ? raw.pendingRefundToken.trim() : "";
+  const orderId = typeof raw.orderId === "string" ? raw.orderId.trim() : "";
+  if (!pendingRefundToken || pendingRefundToken.length > 4096 || !orderId || orderId.length > 256) return null;
+
+  return {
+    pendingRefundToken,
+    orderId,
+    refundReason: typeof raw.refundReason === "number" && Number.isInteger(raw.refundReason) ? raw.refundReason : null,
+    obfuscatedAccountId: boundedOptionalString(raw.obfuscatedAccountId, 256),
+    obfuscatedProfileId: boundedOptionalString(raw.obfuscatedProfileId, 256),
+  };
+}
+
+async function listPendingRefundReviews(now = Date.now()): Promise<Record<string, unknown>> {
+  const result = await pool.query<PendingRefundReviewRow>(
+    `SELECT review_id, order_id, refund_reason, obfuscated_account_id, obfuscated_profile_id,
+            event_time, received_at, deadline_at, status, decision,
+            sample_content_provided, consumption_percentage_milliunits,
+            consumption_usage_events, submit_attempts, google_status,
+            last_attempt_at, completed_at, updated_at
+     FROM play_pending_refund_reviews
+     WHERE status <> 'COMPLETED'
+     ORDER BY deadline_at ASC, received_at ASC
+     LIMIT 500`,
+  );
+
+  return {
+    reviews: result.rows.map((row) => {
+      const deadlineAt = Number(row.deadline_at);
+      return {
+        reviewId: row.review_id,
+        orderId: row.order_id,
+        refundReason: row.refund_reason,
+        obfuscatedAccountId: row.obfuscated_account_id,
+        obfuscatedProfileId: row.obfuscated_profile_id,
+        eventTime: row.event_time === null ? null : Number(row.event_time),
+        receivedAt: Number(row.received_at),
+        deadlineAt,
+        deadlineState: refundReviewDeadlineState(deadlineAt, now),
+        millisecondsRemaining: Math.max(0, deadlineAt - now),
+        status: row.status,
+        decision: row.decision,
+        submitAttempts: Number(row.submit_attempts),
+        googleStatus: row.google_status,
+        lastAttemptAt: row.last_attempt_at === null ? null : Number(row.last_attempt_at),
+        updatedAt: Number(row.updated_at),
+      };
+    }),
+  };
+}
+
+export function refundReviewDeadlineState(
+  deadlineAt: number,
+  now = Date.now(),
+): "open" | "due_soon" | "overdue" {
+  if (deadlineAt <= now) return "overdue";
+  if (deadlineAt - now <= REFUND_REVIEW_ALERT_THRESHOLD_MS) return "due_soon";
+  return "open";
+}
+
+async function submitPendingRefundReview(request: http.IncomingMessage): Promise<ApiResult> {
+  const body = await readJson(request);
+  const reviewId = typeof body.reviewId === "string" ? body.reviewId.trim() : "";
+  const refundPreference = normalizeRefundPreference(body.refundPreference);
+  const sampleContentProvided = typeof body.sampleContentProvided === "boolean"
+    ? body.sampleContentProvided
+    : null;
+  const consumptionPercentageMilliunits = optionalInt(body.consumptionPercentageMilliunits);
+  const usageEvents = normalizeConsumptionUsageEvents(body.consumptionUsageEvents);
+
+  if (!reviewId || reviewId.length > 80 || !refundPreference || sampleContentProvided === null) {
+    return { status: 400, body: { error: "validation_failed", message: "Review ID, refund preference, and sample-content flag are required." } };
+  }
+  if (
+    consumptionPercentageMilliunits !== null &&
+    (consumptionPercentageMilliunits < 0 || consumptionPercentageMilliunits > 100_000)
+  ) {
+    return { status: 400, body: { error: "validation_failed", message: "Consumption percentage must be between 0 and 100000 milliunits." } };
+  }
+  if (body.consumptionUsageEvents !== undefined && usageEvents === null) {
+    return { status: 400, body: { error: "validation_failed", message: "Consumption usage evidence is invalid." } };
+  }
+
+  const evidence = usageEvents ?? [];
+  const existing = await pool.query<PendingRefundReviewRow>(
+    "SELECT * FROM play_pending_refund_reviews WHERE review_id = $1",
+    [reviewId],
+  );
+  const current = existing.rows[0];
+  if (!current) return { status: 404, body: { error: "review_not_found" } };
+
+  if (current.status === "COMPLETED") {
+    if (sameReviewSubmission(current, refundPreference, sampleContentProvided, consumptionPercentageMilliunits, evidence)) {
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          duplicate: true,
+          reviewId,
+          decision: current.decision,
+          completedAt: current.completed_at === null ? null : Number(current.completed_at),
+        },
+      };
+    }
+    return { status: 409, body: { error: "review_already_completed", reviewId } };
+  }
+
+  const credentials = serviceAccount();
+  if (!credentials) {
+    return { status: 503, body: { error: "billing_not_configured" } };
+  }
+
+  const now = Date.now();
+  const claim = await tx(async (client) => {
+    const locked = await client.query<PendingRefundReviewRow>(
+      "SELECT * FROM play_pending_refund_reviews WHERE review_id = $1 FOR UPDATE",
+      [reviewId],
+    );
+    const row = locked.rows[0];
+    if (!row) return { kind: "missing" as const };
+    if (row.status === "COMPLETED") {
+      return sameReviewSubmission(row, refundPreference, sampleContentProvided, consumptionPercentageMilliunits, evidence)
+        ? { kind: "duplicate" as const, row }
+        : { kind: "completed" as const, row };
+    }
+    if (row.status === "SUBMITTING") return { kind: "in_progress" as const, row };
+
+    await client.query(
+      `UPDATE play_pending_refund_reviews
+       SET status = 'SUBMITTING',
+           decision = $2,
+           sample_content_provided = $3,
+           consumption_percentage_milliunits = $4,
+           consumption_usage_events = $5::jsonb,
+           submit_attempts = submit_attempts + 1,
+           last_attempt_at = $6,
+           updated_at = $6
+       WHERE review_id = $1`,
+      [
+        reviewId,
+        refundPreference,
+        sampleContentProvided,
+        consumptionPercentageMilliunits,
+        JSON.stringify(evidence),
+        now,
+      ],
+    );
+    return { kind: "claimed" as const, row };
+  });
+
+  if (claim.kind === "missing") return { status: 404, body: { error: "review_not_found" } };
+  if (claim.kind === "duplicate") {
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        duplicate: true,
+        reviewId,
+        decision: claim.row.decision,
+        completedAt: claim.row.completed_at === null ? null : Number(claim.row.completed_at),
+      },
+    };
+  }
+  if (claim.kind === "completed") return { status: 409, body: { error: "review_already_completed", reviewId } };
+  if (claim.kind === "in_progress") return { status: 409, body: { error: "review_submission_in_progress", reviewId } };
+
+  const requestPayload: Record<string, unknown> = {
+    pendingRefundToken: claim.row.pending_refund_token,
+    sampleContentProvided,
+    refundPreference,
+  };
+  if (consumptionPercentageMilliunits !== null) {
+    requestPayload.consumptionPercentageMilliunits = consumptionPercentageMilliunits;
+  }
+  if (evidence.length > 0) requestPayload.consumptionUsageEvents = evidence;
+
+  let providerStatus: number | null = null;
+  let providerBody: unknown = {};
+  try {
+    const accessToken = await googleAccessToken(credentials);
+    const endpoint = new URL(
+      `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${encodeURIComponent(PACKAGE_NAME)}/orders/${encodeURIComponent(claim.row.order_id)}:reviewrefund`,
+    );
+    const providerResponse = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(requestPayload),
+    });
+    providerStatus = providerResponse.status;
+    const text = await providerResponse.text();
+    providerBody = safeProviderResponse(text);
+
+    if (!providerResponse.ok) {
+      await markRefundReviewFailed(reviewId, providerStatus, providerBody);
+      return {
+        status: 502,
+        body: {
+          error: "google_review_refund_failed",
+          reviewId,
+          providerStatus,
+        },
+      };
+    }
+  } catch (error) {
+    providerBody = { error: "provider_request_failed", message: String((error as Error)?.message ?? "unknown").slice(0, 300) };
+    await markRefundReviewFailed(reviewId, providerStatus, providerBody);
+    return {
+      status: 502,
+      body: {
+        error: "google_review_refund_failed",
+        reviewId,
+        providerStatus,
+      },
+    };
+  }
+
+  const completedAt = Date.now();
+  await pool.query(
+    `UPDATE play_pending_refund_reviews
+     SET status = 'COMPLETED',
+         google_status = $2,
+         google_response = $3::jsonb,
+         completed_at = $4,
+         updated_at = $4
+     WHERE review_id = $1`,
+    [reviewId, providerStatus, JSON.stringify(providerBody), completedAt],
+  );
+
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      duplicate: false,
+      reviewId,
+      decision: refundPreference,
+      completedAt,
+    },
+  };
+}
+
+async function markRefundReviewFailed(reviewId: string, providerStatus: number | null, providerBody: unknown): Promise<void> {
+  const now = Date.now();
+  await pool.query(
+    `UPDATE play_pending_refund_reviews
+     SET status = 'FAILED',
+         google_status = $2,
+         google_response = $3::jsonb,
+         updated_at = $4
+     WHERE review_id = $1 AND status = 'SUBMITTING'`,
+    [reviewId, providerStatus, JSON.stringify(providerBody), now],
+  );
+}
+
+function sameReviewSubmission(
+  row: PendingRefundReviewRow,
+  preference: RefundPreference,
+  sampleContentProvided: boolean,
+  consumptionPercentageMilliunits: number | null,
+  usageEvents: ConsumptionUsageEvent[],
+): boolean {
+  return row.decision === preference &&
+    row.sample_content_provided === sampleContentProvided &&
+    row.consumption_percentage_milliunits === consumptionPercentageMilliunits &&
+    JSON.stringify(Array.isArray(row.consumption_usage_events) ? row.consumption_usage_events : []) === JSON.stringify(usageEvents);
+}
+
+function normalizeRefundPreference(value: unknown): RefundPreference | null {
+  return value === "APPROVE" || value === "DECLINE" || value === "NEUTRAL" ? value : null;
+}
+
+function normalizeConsumptionUsageEvents(value: unknown): ConsumptionUsageEvent[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 1000) return null;
+
+  const normalized: ConsumptionUsageEvent[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const record = raw as Record<string, unknown>;
+    const event: ConsumptionUsageEvent = {};
+    const obfuscatedAccountId = boundedOptionalString(record.obfuscatedAccountId, 256);
+    const obfuscatedProfileId = boundedOptionalString(record.obfuscatedProfileId, 256);
+    const consumptionTime = boundedOptionalString(record.consumptionTime, 64);
+    const ipAddress = boundedOptionalString(record.ipAddress, 64);
+    const description = boundedOptionalString(record.consumptionItemDescription, 5000);
+    if (record.obfuscatedAccountId !== undefined && obfuscatedAccountId === null) return null;
+    if (record.obfuscatedProfileId !== undefined && obfuscatedProfileId === null) return null;
+    if (record.consumptionTime !== undefined && consumptionTime === null) return null;
+    if (record.ipAddress !== undefined && ipAddress === null) return null;
+    if (record.consumptionItemDescription !== undefined && description === null) return null;
+    if (obfuscatedAccountId) event.obfuscatedAccountId = obfuscatedAccountId;
+    if (obfuscatedProfileId) event.obfuscatedProfileId = obfuscatedProfileId;
+    if (consumptionTime) event.consumptionTime = consumptionTime;
+    if (ipAddress) event.ipAddress = ipAddress;
+    if (description) event.consumptionItemDescription = description;
+
+    if (record.location !== undefined) {
+      if (!record.location || typeof record.location !== "object" || Array.isArray(record.location)) return null;
+      const location = record.location as Record<string, unknown>;
+      const regionCode = boundedOptionalString(location.regionCode, 8);
+      if (!regionCode) return null;
+      event.location = { regionCode };
+      const administrativeArea = boundedOptionalString(location.administrativeArea, 128);
+      const locality = boundedOptionalString(location.locality, 128);
+      const sublocality = boundedOptionalString(location.sublocality, 128);
+      if (location.administrativeArea !== undefined && administrativeArea === null) return null;
+      if (location.locality !== undefined && locality === null) return null;
+      if (location.sublocality !== undefined && sublocality === null) return null;
+      if (administrativeArea) event.location.administrativeArea = administrativeArea;
+      if (locality) event.location.locality = locality;
+      if (sublocality) event.location.sublocality = sublocality;
+    }
+    normalized.push(event);
+  }
+  return normalized;
+}
+
+function boundedOptionalString(value: unknown, maxLength: number): string | null {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed && trimmed.length <= maxLength ? trimmed : null;
+}
+
+function safeProviderResponse(text: string): unknown {
+  if (!text) return {};
+  try {
+    const parsed = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null ? parsed : { value: String(parsed).slice(0, 2000) };
+  } catch {
+    return { body: text.slice(0, 2000) };
+  }
 }
 
 async function verifyGooglePushToken(
