@@ -107,22 +107,6 @@ async function handleMatchmake(request: Request, env: Env, url: URL): Promise<Re
   const mode = parseMode(url.searchParams.get("mode"));
   const cors = corsHeaders(request, env);
 
-  if (mode === "PRACTICE") {
-    const roomId = `practice-${crypto.randomUUID()}-${Date.now().toString(36)}`;
-    const roomTicket = await mintRoomTicket(env, roomId, mode);
-    if (!roomTicket) return Response.json({ error: "match_tickets_unavailable" }, { status: 503, headers: cors });
-    return Response.json(
-      {
-        roomId,
-        roomTicket,
-        mode,
-        playersWaiting: 1,
-        lobbyEndsAt: Date.now() + MODE_CONFIG.PRACTICE.lobbyMs,
-      },
-      { headers: cors },
-    );
-  }
-
   const response = await dispatchToDo(env, "Matchmaker", mode, request);
   if (!response.ok) {
     const headers = new Headers(cors);
@@ -158,6 +142,26 @@ async function handleWebSocketTicket(request: Request, env: Env): Promise<Respon
   if (!roomId || !roomTicket) {
     return Response.json({ error: "invalid_socket_ticket_request" }, { status: 400, headers: cors });
   }
+
+  // Socket-ticket exchange is an authenticated, relatively expensive path.
+  // Reuse the mode Matchmaker Durable Object as a distributed per-IP limiter
+  // without touching its lobby bucket.
+  const limiterHeaders = new Headers(request.headers);
+  limiterHeaders.set("X-Quiz-Rate-Limit-Only", "socket-ticket");
+  const limiter = await dispatchToDo(
+    env,
+    "Matchmaker",
+    mode,
+    new Request(`https://do.internal/rate-limit?mode=${mode}`, { headers: limiterHeaders }),
+  );
+  if (limiter.status === 429) {
+    const headers = new Headers(cors);
+    const retryAfter = limiter.headers.get("Retry-After");
+    if (retryAfter) headers.set("Retry-After", retryAfter);
+    headers.set("Content-Type", "application/json");
+    return new Response(limiter.body, { status: 429, headers });
+  }
+
   if (!(await verifyRoomTicket(env, roomTicket, roomId, mode))) {
     return Response.json({ error: "invalid_match_room_ticket" }, { status: 403, headers: cors });
   }
