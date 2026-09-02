@@ -187,6 +187,18 @@ type CosmeticItemRow = {
   equipped?: boolean;
 };
 
+type MatchAppearanceCosmetic = {
+  cosmeticId: string;
+  displayName: string;
+};
+
+type MatchAppearance = {
+  avatarFrame: MatchAppearanceCosmetic | null;
+  banner: MatchAppearanceCosmetic | null;
+  title: MatchAppearanceCosmetic | null;
+  badge: MatchAppearanceCosmetic | null;
+};
+
 const matchOutcomeSchema = z.object({
   matchId: z.string().min(1),
   subjectKind: z.enum(["USER", "GUEST"]),
@@ -506,6 +518,7 @@ async function resolveUser(request: http.IncomingMessage): Promise<ApiResponse> 
     entitlements,
     currencyBalances: currencyBalancesFor(record),
     powerUpCharges: entitlements.unlimitedCurrency ? REVIEW_ACCOUNT_BALANCE : stats.powerUpCharges,
+    appearance: await equippedMatchAppearance(pool, record.user_id),
   }];
 }
 
@@ -1571,6 +1584,35 @@ async function hydrateCosmetics(db: DbClient, record: UserRow): Promise<Cosmetic
     owned: unlockAll || row.owned === true,
     equipped: row.equipped === true,
   }));
+}
+
+async function equippedMatchAppearance(db: DbClient, userId: string): Promise<MatchAppearance> {
+  const rows = await db.query<{
+    cosmetic_type: CosmeticItemDto["cosmeticType"];
+    cosmetic_id: string;
+    display_name: string;
+  }>(
+    `SELECT c.cosmetic_type, c.cosmetic_id, c.display_name
+     FROM equipped_cosmetics ec
+     JOIN cosmetic_items c ON c.cosmetic_id = ec.cosmetic_id
+     WHERE ec.user_id = $1 AND c.active = true`,
+    [userId],
+  );
+
+  const appearance: MatchAppearance = {
+    avatarFrame: null,
+    banner: null,
+    title: null,
+    badge: null,
+  };
+  for (const row of rows.rows) {
+    const item = { cosmeticId: row.cosmetic_id, displayName: row.display_name };
+    if (row.cosmetic_type === "avatar_frame") appearance.avatarFrame = item;
+    else if (row.cosmetic_type === "banner") appearance.banner = item;
+    else if (row.cosmetic_type === "title") appearance.title = item;
+    else if (row.cosmetic_type === "badge") appearance.badge = item;
+  }
+  return appearance;
 }
 
 async function getCosmeticItem(db: DbClient, cosmeticId: string): Promise<CosmeticItemRow | null> {
