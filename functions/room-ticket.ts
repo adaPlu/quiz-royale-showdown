@@ -54,8 +54,7 @@ export async function verifyRoomTicket(
   if (!Number.isFinite(expiresAt) || expiresAt < now) return false;
 
   const payload = parts.slice(0, 4).join(".");
-  const expected = await sign(secret, payload);
-  return expected === parts[4];
+  return await verifySignature(secret, payload, parts[4] ?? "");
 }
 
 /**
@@ -102,7 +101,7 @@ export async function verifySocketTicket(
   if (parts.length !== 2) return null;
   const [encoded, signature] = parts;
   if (!encoded || !signature) return null;
-  if ((await sign(secret, encoded)) !== signature) return null;
+  if (!(await verifySignature(secret, encoded, signature))) return null;
 
   const payload = decodeSocketPayload(encoded);
   if (!payload) return null;
@@ -153,6 +152,37 @@ async function sign(secret: string, payload: string): Promise<string> {
   );
   const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
   return base64Url(signature);
+}
+
+/**
+ * Delegate HMAC comparison to WebCrypto rather than comparing encoded
+ * signatures with JavaScript string equality. This keeps ticket verification
+ * on the platform crypto path and avoids timing-sensitive string comparison.
+ */
+async function verifySignature(secret: string, payload: string, encodedSignature: string): Promise<boolean> {
+  const signature = decodeBase64Url(encodedSignature);
+  if (!signature) return false;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["verify"],
+  );
+  return await crypto.subtle.verify("HMAC", key, signature, encoder.encode(payload));
+}
+
+function decodeBase64Url(value: string): Uint8Array | null {
+  try {
+    const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+    const raw = atob(padded);
+    const bytes = new Uint8Array(raw.length);
+    for (let index = 0; index < raw.length; index += 1) bytes[index] = raw.charCodeAt(index);
+    return bytes;
+  } catch {
+    return null;
+  }
 }
 
 function base64Url(buffer: ArrayBufferLike): string {
