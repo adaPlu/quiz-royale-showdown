@@ -435,13 +435,7 @@ async function handleGooglePlayRtdn(request: http.IncomingMessage): Promise<ApiR
     return { status: 200, body: { ok: true, ignored: "package_mismatch" } };
   }
 
-  const eventKind =
-    payload.voidedPurchaseNotification ? "voided_purchase" :
-    payload.pendingRefundReviewNotification ? "pending_refund_review" :
-    payload.oneTimeProductNotification ? "one_time_product" :
-    payload.subscriptionNotification ? "subscription" :
-    payload.testNotification ? "test" :
-    "unknown";
+  const eventKind = rtdnEventKind(payload);
 
   const inserted = await pool.query(
     `INSERT INTO play_rtdn_events(message_id, package_name, event_kind, event_time, received_at)
@@ -457,6 +451,15 @@ async function handleGooglePlayRtdn(request: http.IncomingMessage): Promise<ApiR
   // reconciler decide whether any currency must be reversed.
   await reconcileVoidedPurchases();
   return { status: 200, body: { ok: true, eventKind } };
+}
+
+export function rtdnEventKind(payload: RtdnPayload): string {
+  if (payload.voidedPurchaseNotification) return "voided_purchase";
+  if (payload.pendingRefundReviewNotification) return "pending_refund_review";
+  if (payload.oneTimeProductNotification) return "one_time_product";
+  if (payload.subscriptionNotification) return "subscription";
+  if (payload.testNotification) return "test";
+  return "unknown";
 }
 
 async function verifyGooglePushToken(
