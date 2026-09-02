@@ -32,8 +32,8 @@ A custom production web origin may also be deployed through the prepared Cloudfl
 
 ```text
 applicationId: com.rork.quizroyaleshowdown
-versionName:   1.8
-versionCode:   1787428687
+versionName:   1.9
+versionCode:   1787428688
 minSdk:        26
 targetSdk:     36
 compileSdk:    36
@@ -918,15 +918,16 @@ For paid coins/gems:
 
 # Known Hardening / Polish Work
 
-The 1.8 release adds automatic season rollover, match-visible cosmetics, safe Redis/PostgreSQL/billing health reporting, and authenticated RTDN ingestion. Remaining production work is narrower:
+The 1.9 release closes the remaining P1 chargeback-operations gap from the 1.8 reassessment. Authenticated pending-refund RTDNs now create a durable 24-hour operator review queue, explicit protected APPROVE / DECLINE / NEUTRAL actions call Google Play ReviewRefund, and repeated submissions are idempotent. Android 1.9 also adds a secret-backed signed-release workflow that verifies the approved upload certificate before and after build.
 
-- finish Google Play / Pub/Sub provider-side RTDN configuration and matching Railway variables;
-- switch the Railway production source branch from the transitional branch to canonical `main`;
+Remaining production work is P2 / polish:
+
 - deeper adversarial commerce and multiplayer load/soak testing;
-- permanent signed-AAB/R8 release validation in CI;
+- external alert delivery beyond the built-in pending-refund deadline logs;
 - more bespoke cosmetic artwork and animation;
-- external alert delivery for abnormal API, matchmaking, database, and commerce failure rates;
 - ongoing balance, seasonal-content, and trivia-quality tuning.
+
+The signed 1.9 workflow requires the repository signing secrets before it can emit Play-uploadable APK/AAB artifacts; the keystore itself must never be committed.
 
 These are release-operations and polish tasks rather than missing core architecture.
 
