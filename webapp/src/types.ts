@@ -132,6 +132,7 @@ export type SeasonProgress = {
 export type CurrentSeasonEnvelope = {
   season: Season;
   progress: SeasonProgress;
+  hasSeasonPass?: boolean;
 };
 
 export type LeaderboardEntry = {
@@ -168,6 +169,18 @@ export type PublicQuestion = {
   options: string[];
 };
 
+export type MatchAppearanceCosmetic = {
+  cosmeticId: string;
+  displayName: string;
+};
+
+export type MatchAppearance = {
+  avatarFrame?: MatchAppearanceCosmetic | null;
+  banner?: MatchAppearanceCosmetic | null;
+  title?: MatchAppearanceCosmetic | null;
+  badge?: MatchAppearanceCosmetic | null;
+};
+
 export type PublicPlayer = {
   id: string;
   name: string;
@@ -179,6 +192,7 @@ export type PublicPlayer = {
   hasAnswered: boolean;
   lastAnswerCorrect?: boolean | null;
   placement?: number | null;
+  appearance?: MatchAppearance | null;
 };
 
 export type PublicMatch = {
