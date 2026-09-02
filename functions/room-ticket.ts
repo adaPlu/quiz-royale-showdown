@@ -80,6 +80,7 @@ export async function mintSocketTicket(
     subjectId: identity.subjectId,
     displayName: identity.displayName,
     powerUpCharges: identity.powerUpCharges,
+    appearance: identity.appearance ?? null,
     expiresAt: now + SOCKET_TICKET_TTL_MS,
     nonce: crypto.randomUUID(),
   };
