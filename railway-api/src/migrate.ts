@@ -38,6 +38,7 @@ const managedTables = new Set([
   "user_season_passes",
   "play_purchase_voids",
   "play_rtdn_events",
+  "play_pending_refund_reviews",
 ]);
 
 async function main(): Promise<void> {
