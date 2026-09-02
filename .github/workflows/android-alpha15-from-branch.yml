@@ -1,4 +1,4 @@
-name: Android 1.8 Fresh Build
+name: Android 1.9 Fresh Build
 
 on:
   push:
@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   build:
-    name: Fresh Gradle 1.8 code 1787428687
+    name: Fresh Gradle 1.9 code 1787428688
     runs-on: ubuntu-latest
     env:
       EXPO_PUBLIC_RAILWAY_API_URL: https://railway-api-production-5772.up.railway.app
@@ -36,13 +36,13 @@ jobs:
 
       - name: Verify version
         run: |
-          grep 'versionCode = 1787428687' app/build.gradle.kts
-          grep 'versionName = "1.8"' app/build.gradle.kts
+          grep 'versionCode = 1787428688' app/build.gradle.kts
+          grep 'versionName = "1.9"' app/build.gradle.kts
 
       - name: Run unit tests
         run: ./gradlew :app:testDebugUnitTest --stacktrace
 
-      - name: Fresh bundleRelease
+      - name: Fresh unsigned bundleRelease
         run: ./gradlew clean :app:bundleRelease --stacktrace
 
       - name: Collect AAB
@@ -50,13 +50,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-artifacts
-          cp app/build/outputs/bundle/release/app-release.aab release-artifacts/QuizRoyaleShowdown-v1.8-code1787428687-fresh-unsigned.aab
+          cp app/build/outputs/bundle/release/app-release.aab release-artifacts/QuizRoyaleShowdown-v1.9-code1787428688-fresh-unsigned.aab
           sha256sum release-artifacts/* > release-artifacts/SHA256SUMS.txt
 
       - name: Upload fresh AAB
         uses: actions/upload-artifact@v4
         with:
-          name: quiz-royale-v1.8-code1787428687-fresh
+          name: quiz-royale-v1.9-code1787428688-fresh-unsigned
           path: android-quiz-royale-showdown/release-artifacts/*
           if-no-files-found: error
           retention-days: 14
