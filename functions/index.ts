@@ -107,7 +107,16 @@ async function handleMatchmake(request: Request, env: Env, url: URL): Promise<Re
   const mode = parseMode(url.searchParams.get("mode"));
   const cors = corsHeaders(request, env);
 
-  const response = await dispatchToDo(env, "Matchmaker", mode, request);
+  const matchmakeHeaders = new Headers(request.headers);
+  // This header is Worker-internal control input for rate-only checks. Never
+  // allow a caller to turn a normal matchmaking request into that control path.
+  matchmakeHeaders.delete("X-Quiz-Rate-Limit-Only");
+  const response = await dispatchToDo(
+    env,
+    "Matchmaker",
+    mode,
+    new Request(request, { headers: matchmakeHeaders }),
+  );
   if (!response.ok) {
     const headers = new Headers(cors);
     headers.set("Content-Type", "application/json");
