@@ -15,7 +15,7 @@ import {
   type FieldErrors,
 } from "./auth-core.js";
 import { CATEGORIES, WORLD_BOARD, normalizeBoard } from "./categories.js";
-import { closeCache } from "./cache.js";
+import { cacheHealth, closeCache } from "./cache.js";
 import {
   GUEST_TTL_MS,
   GOOGLE_PLAY_REVIEW_EMAIL,
@@ -65,6 +65,7 @@ import {
   usageReportSchema,
 } from "./question-service.js";
 import { explicitReviewPassword } from "./runtime-config.js";
+import { googlePlayHealthStatus } from "./commerce.js";
 
 const PORT = Number.parseInt(process.env.PORT ?? "8080", 10);
 const PASSWORD_RESET_TTL_MS = 30 * 60 * 1000;
@@ -233,7 +234,7 @@ export async function handleRequest(request: http.IncomingMessage, response: htt
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
 
     if (request.method === "GET" && url.pathname === "/health") {
-      return send(response, 200, { ok: true, service: "quiz-royale-api", now: Date.now() });
+      return sendResponse(response, await healthStatus());
     }
 
     if (request.method === "POST" && url.pathname === "/auth/register") return sendResponse(response, await rateLimited(request, "register", () => register(request)));
@@ -306,6 +307,42 @@ async function start(): Promise<void> {
   server.listen(PORT, () => {
     console.log(`quiz-royale-api listening on ${PORT}`);
   });
+}
+
+async function healthStatus(): Promise<ApiResponse> {
+  const now = Date.now();
+  let postgres: "connected" | "error" = "connected";
+  try {
+    await pool.query("SELECT 1");
+  } catch {
+    postgres = "error";
+  }
+
+  const redis = await cacheHealth();
+  const googlePlay = googlePlayHealthStatus();
+  let season: { seasonId: string; endsAt: number } | null = null;
+  if (postgres === "connected") {
+    const current = await getActiveSeason(pool).catch(() => null);
+    if (current) season = { seasonId: current.season_id, endsAt: Number(current.ends_at) };
+  }
+
+  const ok = postgres === "connected";
+  return [ok ? 200 : 503, {
+    ok,
+    service: "quiz-royale-api",
+    now,
+    version: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 12) ?? null,
+    dependencies: {
+      postgres,
+      redis,
+      googlePlay,
+      rtdn: process.env.GOOGLE_PLAY_RTDN_AUDIENCE?.trim() &&
+        process.env.GOOGLE_PLAY_RTDN_SERVICE_ACCOUNT_EMAIL?.trim()
+        ? "configured"
+        : "not_configured",
+    },
+    season,
+  }];
 }
 
 async function register(request: http.IncomingMessage): Promise<ApiResponse> {
