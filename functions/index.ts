@@ -14,7 +14,7 @@ import {
   type DoClassName,
   type DoEnv,
 } from "./do-dispatch";
-import { MODE_CONFIG, type GameMode } from "./protocol";
+import type { GameMode } from "./protocol";
 import type { GuestSessionDto, SubjectKind } from "./identity";
 import { callRailwayJson } from "./railway-api";
 import { buildMatchRoomTargetUrl } from "./match-routing";
