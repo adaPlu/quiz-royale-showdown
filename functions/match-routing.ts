@@ -1,10 +1,11 @@
-import type { GameMode } from "./protocol";
+import type { GameMode, MatchAppearance } from "./protocol";
 
 export type MatchRoomIdentity = {
   kind: "USER" | "GUEST";
   subjectId: string;
   displayName: string;
   powerUpCharges: number;
+  appearance?: MatchAppearance | null;
 };
 
 export function buildMatchRoomTargetUrl(
@@ -21,5 +22,8 @@ export function buildMatchRoomTargetUrl(
   target.searchParams.set("kind", identity.kind);
   target.searchParams.set("mode", mode);
   target.searchParams.set("powerUpCharges", String(identity.powerUpCharges));
+  if (identity.appearance) {
+    target.searchParams.set("appearance", JSON.stringify(identity.appearance));
+  }
   return target.toString();
 }
