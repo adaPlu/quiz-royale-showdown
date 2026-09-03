@@ -57,7 +57,7 @@ jobs:
 
           ACTUAL_FINGERPRINT="$(
             keytool -list -v               -keystore "$KEYSTORE_PATH"               -storepass "$ANDROID_KEYSTORE_PASSWORD"               -alias "$ANDROID_KEY_ALIAS" |
-              awk '/SHA256:/{print $2; exit}'
+              awk '/SHA256:/{print $NF; exit}'
           )"
           test "$ACTUAL_FINGERPRINT" = "$EXPECTED_UPLOAD_CERT_SHA256" || {
             echo "Upload certificate fingerprint does not match the approved Quiz Royale key."
@@ -88,7 +88,7 @@ jobs:
           EXPECTED_COMPACT="$(printf '%s' "$EXPECTED_UPLOAD_CERT_SHA256" | tr -d ':' | tr '[:upper:]' '[:lower:]')"
           APK_FINGERPRINT="$(
             "$APKSIGNER" verify --print-certs "$APK" |
-              awk -F': ' '/certificate SHA-256 digest/{print $2; exit}' |
+              awk -F': ' '/certificate SHA-256 digest/{print $NF; exit}' |
               tr '[:upper:]' '[:lower:]'
           )"
           test "$APK_FINGERPRINT" = "$EXPECTED_COMPACT" || {
@@ -99,7 +99,7 @@ jobs:
           jarsigner -verify "$AAB" >/dev/null
           AAB_FINGERPRINT="$(
             keytool -printcert -jarfile "$AAB" |
-              awk '/SHA256:/{print $2; exit}'
+              awk '/SHA256:/{print $NF; exit}'
           )"
           test "$AAB_FINGERPRINT" = "$EXPECTED_UPLOAD_CERT_SHA256" || {
             echo "AAB signer certificate does not match the approved Quiz Royale upload key."
