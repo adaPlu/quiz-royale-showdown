@@ -6,6 +6,7 @@ import {
   startGooglePlayVoidedPurchaseReconciler,
 } from "./commerce.js";
 import { pool } from "./db.js";
+import { handleDifficultyQuestionRequest } from "./difficulty-questions.js";
 import { startSeasonLifecycleReconciler } from "./season-lifecycle.js";
 import { handleRequest } from "./server.js";
 
@@ -13,6 +14,7 @@ const PORT = Number.parseInt(process.env.PORT ?? "8080", 10);
 
 export const appServer = http.createServer(async (request, response) => {
   if (await handleCommerceRequest(request, response)) return;
+  if (await handleDifficultyQuestionRequest(request, response)) return;
   await handleRequest(request, response);
 });
 

@@ -8,6 +8,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { buildQuestionSet, type Question } from "./questions";
+import { parsePrivateRoomId, type MatchDifficulty } from "./private-match";
 import { competitiveRewardsForMode } from "./match-policy";
 import { callDo, GUEST_REGISTRY_ID, USER_DIRECTORY_ID, type DoClassName, type DoEnv } from "./do-dispatch";
 import type { MatchOutcome, SubjectKind } from "./identity";
@@ -277,7 +278,9 @@ export class MatchRoom extends DurableObject<Env> {
   private async ensureState(mode: GameMode): Promise<MatchState> {
     if (this.state) return this.state;
     const cfg = MODE_CONFIG[mode];
-    const selectedQuestions = await this.loadQuestions(mode, cfg.totalRounds);
+    const privateRoom = parsePrivateRoomId(this.ctx.id.name ?? "");
+    const difficulty: MatchDifficulty = privateRoom?.difficulty ?? "MIXED";
+    const selectedQuestions = await this.loadQuestions(mode, cfg.totalRounds, difficulty);
     this.state = {
       matchId: this.ctx.id.name ?? crypto.randomUUID(),
       mode,
@@ -295,13 +298,22 @@ export class MatchRoom extends DurableObject<Env> {
     return this.state;
   }
 
-  private async loadQuestions(mode: GameMode, count: number): Promise<{ questions: Question[]; fromRailway: boolean }> {
+  private async loadQuestions(
+    mode: GameMode,
+    count: number,
+    difficulty: MatchDifficulty = "MIXED",
+  ): Promise<{ questions: Question[]; fromRailway: boolean }> {
     if (this.env.RAILWAY_API_URL) {
-      const railway = await selectQuestionsFromRailway(this.env, mode, count).catch(() => null);
+      const railway = await selectQuestionsFromRailway(this.env, mode, count, difficulty).catch(() => null);
       if (railway?.length === count) return { questions: railway, fromRailway: true };
+      if (difficulty !== "MIXED") {
+        throw new Error(`Railway ${difficulty.toLowerCase()} question pool is unavailable.`);
+      }
       if (this.env.ALLOW_STATIC_QUESTIONS_FALLBACK !== "true") {
         throw new Error("Railway question selection failed and static fallback is disabled.");
       }
+    } else if (difficulty !== "MIXED") {
+      throw new Error(`Railway is required for explicit ${difficulty.toLowerCase()} difficulty matches.`);
     }
     return { questions: buildQuestionSet(count), fromRailway: false };
   }

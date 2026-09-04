@@ -1,4 +1,5 @@
 import type { MatchOutcome } from "./identity";
+import type { MatchDifficulty } from "./private-match";
 import type { GameMode } from "./protocol";
 import type { Question } from "./questions";
 
@@ -49,11 +50,18 @@ export async function selectQuestionsFromRailway(
   env: RailwayEnv,
   mode: GameMode,
   count: number,
+  difficulty: MatchDifficulty = "MIXED",
 ): Promise<Question[] | null> {
+  const explicit = difficulty === "EASY" || difficulty === "MEDIUM" || difficulty === "HARD";
   const response = await callRailwayJson<{ questions: Question[] }>(
     env,
-    "/internal/questions/select",
-    { method: "POST", body: { mode, count } },
+    explicit ? "/internal/questions/select-difficulty" : "/internal/questions/select",
+    {
+      method: "POST",
+      body: explicit
+        ? { mode, count, difficulty: difficulty.toLowerCase() }
+        : { mode, count },
+    },
   );
   return response?.questions ?? null;
 }

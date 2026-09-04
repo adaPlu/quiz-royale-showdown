@@ -1,12 +1,18 @@
-// functions/matchmaker.ts — one singleton instance per game mode.
+// functions/matchmaker.ts — public matchmaking plus a private-room directory.
 //
-// Plain HTTP (no WebSocket): the client asks for a room id, then opens its
-// match socket straight to that room. Keeping matchmaking off the socket path
-// means a player never sits in a queue — they are placed into an open lobby
-// immediately and the room itself runs the countdown.
+// Public matchmaking keeps one singleton instance per game mode. Private room
+// discovery reuses the same Durable Object class under PRIVATE_DIRECTORY_ID so
+// room-code state remains strongly consistent without adding another binding.
 
 import { DurableObject } from "cloudflare:workers";
 import { MODE_CONFIG, type GameMode } from "./protocol";
+import {
+  buildPrivateRoomId,
+  generateRoomCode,
+  normalizeMatchDifficulty,
+  normalizeRoomCode,
+  type MatchDifficulty,
+} from "./private-match";
 import { enforceRateLimit } from "./rate-limit";
 
 type Bucket = {
@@ -15,11 +21,26 @@ type Bucket = {
   openedAt: number;
 };
 
+type PrivateRoomRecord = {
+  code: string;
+  roomId: string;
+  hostId: string;
+  mode: GameMode;
+  difficulty: MatchDifficulty;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export const PRIVATE_DIRECTORY_ID = "private-directory";
 const BUCKET_KEY = "open-bucket";
+const PRIVATE_ROOM_TTL_MS = 2 * 60 * 60 * 1000;
+const PRIVATE_ROOM_CREATE_ATTEMPTS = 12;
 
 export class Matchmaker extends DurableObject {
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname.startsWith("/private/")) return this.handlePrivateRequest(request, url);
+
     const mode = parseMode(this.ctx.id.name ?? url.searchParams.get("mode"));
     const cfg = MODE_CONFIG[mode];
 
@@ -59,6 +80,90 @@ export class Matchmaker extends DurableObject {
       lobbyEndsAt: next.openedAt + cfg.lobbyMs,
     });
   }
+
+  private async handlePrivateRequest(request: Request, url: URL): Promise<Response> {
+    const action = url.pathname === "/private/create" ? "private-create" : "private-room";
+    const limited = await enforceRateLimit(
+      this.ctx,
+      request,
+      action,
+      action === "private-create" ? { max: 10, windowMs: 60_000 } : { max: 60, windowMs: 60_000 },
+    );
+    if (limited) return limited;
+
+    if (request.method !== "POST") return Response.json({ error: "method_not_allowed" }, { status: 405 });
+
+    let body: Record<string, unknown>;
+    try {
+      body = await request.json() as Record<string, unknown>;
+    } catch {
+      return Response.json({ error: "invalid_json" }, { status: 400 });
+    }
+
+    const hostId = typeof body.hostId === "string" ? body.hostId.trim() : "";
+    if (url.pathname === "/private/create") {
+      if (!hostId) return Response.json({ error: "host_required" }, { status: 400 });
+      return this.createPrivateRoom(hostId, parseMode(typeof body.mode === "string" ? body.mode : null), normalizeMatchDifficulty(body.difficulty));
+    }
+
+    const code = normalizeRoomCode(typeof body.code === "string" ? body.code : "");
+    if (!code) return Response.json({ error: "invalid_room_code" }, { status: 400 });
+    const current = await this.loadPrivateRoom(code);
+    if (!current) return Response.json({ error: "room_not_found" }, { status: 404 });
+
+    if (url.pathname === "/private/join") return Response.json(current);
+
+    if (url.pathname === "/private/update") {
+      if (!hostId || hostId !== current.hostId) return Response.json({ error: "host_required" }, { status: 403 });
+      const mode = parseMode(typeof body.mode === "string" ? body.mode : current.mode);
+      const difficulty = normalizeMatchDifficulty(body.difficulty ?? current.difficulty);
+      const updated: PrivateRoomRecord = {
+        ...current,
+        roomId: buildPrivateRoomId(code, mode, difficulty),
+        mode,
+        difficulty,
+        updatedAt: Date.now(),
+      };
+      await this.ctx.storage.put(privateRoomKey(code), updated);
+      return Response.json(updated);
+    }
+
+    return Response.json({ error: "not_found" }, { status: 404 });
+  }
+
+  private async createPrivateRoom(hostId: string, mode: GameMode, difficulty: MatchDifficulty): Promise<Response> {
+    const now = Date.now();
+    for (let attempt = 0; attempt < PRIVATE_ROOM_CREATE_ATTEMPTS; attempt += 1) {
+      const code = generateRoomCode();
+      const existing = await this.loadPrivateRoom(code);
+      if (existing) continue;
+      const room: PrivateRoomRecord = {
+        code,
+        roomId: buildPrivateRoomId(code, mode, difficulty),
+        hostId,
+        mode,
+        difficulty,
+        createdAt: now,
+        updatedAt: now,
+      };
+      await this.ctx.storage.put(privateRoomKey(code), room);
+      return Response.json(room, { status: 201 });
+    }
+    return Response.json({ error: "room_code_capacity" }, { status: 503 });
+  }
+
+  private async loadPrivateRoom(code: string): Promise<PrivateRoomRecord | null> {
+    const key = privateRoomKey(code);
+    const room = await this.ctx.storage.get<PrivateRoomRecord>(key);
+    if (!room) return null;
+    if (Date.now() - room.updatedAt <= PRIVATE_ROOM_TTL_MS) return room;
+    await this.ctx.storage.delete(key);
+    return null;
+  }
+}
+
+function privateRoomKey(code: string): string {
+  return `private:${code}`;
 }
 
 function parseMode(raw: string | null): GameMode {
