@@ -1,5 +1,5 @@
 name = "quiz-royale-functions"
-main = "index.ts"
+main = "app.ts"
 compatibility_date = "2026-08-22"
 
 [vars]
