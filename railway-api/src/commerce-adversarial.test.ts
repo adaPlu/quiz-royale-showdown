@@ -37,11 +37,12 @@ test("duplicate partial-refund arithmetic converges to the original grant and ne
 });
 
 test("RTDN classifier rejects payload-shape confusion and preserves single-event precedence", () => {
-  assert.equal(rtdnEventKind({ pendingRefundReviewNotification: null }), "unknown");
-  assert.equal(rtdnEventKind({ oneTimeProductNotification: "forged" }), "unknown");
-  assert.equal(rtdnEventKind({ testNotification: 7 }), "unknown");
+  const classifyMalformed = (value: unknown) => rtdnEventKind(value as Parameters<typeof rtdnEventKind>[0]);
+  assert.equal(classifyMalformed({ pendingRefundReviewNotification: null }), "unknown");
+  assert.equal(classifyMalformed({ oneTimeProductNotification: "forged" }), "unknown");
+  assert.equal(classifyMalformed({ testNotification: 7 }), "unknown");
   assert.equal(
-    rtdnEventKind({ voidedPurchaseNotification: {}, oneTimeProductNotification: {} }),
+    classifyMalformed({ voidedPurchaseNotification: {}, oneTimeProductNotification: {} }),
     "voided_purchase",
   );
 });
