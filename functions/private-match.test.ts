@@ -4,6 +4,7 @@ import {
   buildPrivateRoomId,
   normalizeRoomCode,
   parsePrivateRoomId,
+  questionDifficultyForMatch,
   type MatchDifficulty,
 } from "./private-match.ts";
 
@@ -23,6 +24,13 @@ test("private room ids preserve signed mode and difficulty metadata", () => {
       difficulty,
     });
   }
+});
+
+test("explicit match difficulties map to Railway pools while MIXED preserves existing selection", () => {
+  assert.equal(questionDifficultyForMatch("EASY"), "easy");
+  assert.equal(questionDifficultyForMatch("MEDIUM"), "medium");
+  assert.equal(questionDifficultyForMatch("HARD"), "hard");
+  assert.equal(questionDifficultyForMatch("MIXED"), null);
 });
 
 test("normal public room ids do not parse as private room metadata", () => {
