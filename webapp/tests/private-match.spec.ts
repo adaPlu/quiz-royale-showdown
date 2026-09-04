@@ -117,7 +117,7 @@ test("host creates updates and enters a private room with trusted guest credenti
   await page.goto("/");
   await page.getByRole("navigation", { name: "Primary" }).getByRole("button", { name: "PLAY" }).click();
   await page.getByRole("button", { name: "CREATE PRIVATE ROOM" }).click();
-  await expect(page.getByText("AB2CD3")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "AB2CD3", exact: true })).toBeVisible();
   expect(creates).toEqual([{ mode: "QUICK", difficulty: "MIXED" }]);
 
   await page.getByRole("button", { name: "Select private mode tournament" }).click();
