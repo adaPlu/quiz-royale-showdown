@@ -1,8 +1,8 @@
 import type { GameMode } from "./protocol";
-import { normalizeMatchDifficulty, type MatchDifficulty } from "./private-match";
 
 export type PrivateMatchAction = "create" | "join" | "update";
 export type PrivateMatchIdentity = { subjectId: string };
+export type MatchDifficulty = "EASY" | "MEDIUM" | "HARD" | "MIXED";
 
 type DirectoryResult = {
   status: number;
@@ -60,6 +60,10 @@ function trustedDirectoryInput(
 
 function parseMode(value: unknown): GameMode | null {
   return value === "QUICK" || value === "TOURNAMENT" || value === "PRACTICE" ? value : null;
+}
+
+function normalizeMatchDifficulty(value: unknown): MatchDifficulty {
+  return value === "EASY" || value === "MEDIUM" || value === "HARD" || value === "MIXED" ? value : "MIXED";
 }
 
 export function normalizePrivateMatchSettings(input: Record<string, unknown>): {
