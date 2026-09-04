@@ -73,6 +73,12 @@ jobs:
           --working-dir=android-quiz-royale-showdown
           --command="./gradlew :app:assembleDebug --stacktrace --rerun-tasks --no-build-cache"
 
+      - name: Stop Gradle daemon before analysis
+        if: matrix.language == 'java'
+        working-directory: android-quiz-royale-showdown
+        shell: bash
+        run: ./gradlew --stop
+
       - name: Analyze CodeQL database
         shell: bash
         run: |
@@ -82,8 +88,8 @@ jobs:
             "${{ matrix.suite }}" \
             --format=sarif-latest \
             --output="sarif-results/${{ matrix.sarif }}.sarif" \
-            --threads=0 \
-            --ram=0
+            --threads=2 \
+            --ram=4096
 
       - name: Preserve SARIF results
         uses: actions/upload-artifact@v4
