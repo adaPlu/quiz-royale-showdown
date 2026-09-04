@@ -17,6 +17,14 @@ enum class GameMode {
 }
 
 @Serializable
+enum class MatchDifficulty {
+    @SerialName("EASY") EASY,
+    @SerialName("MEDIUM") MEDIUM,
+    @SerialName("HARD") HARD,
+    @SerialName("MIXED") MIXED
+}
+
+@Serializable
 enum class Phase {
     @SerialName("LOBBY") LOBBY,
     @SerialName("QUESTION") QUESTION,
@@ -109,6 +117,23 @@ data class MatchmakeResponse(
     val playersWaiting: Int = 1,
     val lobbyEndsAt: Long = 0L
 )
+
+@Serializable
+data class PrivateMatchResponse(
+    val code: String,
+    val roomId: String,
+    val roomTicket: String,
+    val mode: GameMode,
+    val difficulty: MatchDifficulty,
+    val createdAt: Long = 0L,
+    val updatedAt: Long = 0L
+) {
+    fun asMatchmakeResponse(): MatchmakeResponse = MatchmakeResponse(
+        roomId = roomId,
+        roomTicket = roomTicket,
+        mode = mode
+    )
+}
 
 // ---------------- Server -> Client ----------------
 
