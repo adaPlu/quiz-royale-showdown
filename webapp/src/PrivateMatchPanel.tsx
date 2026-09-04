@@ -44,14 +44,32 @@ export function PrivateMatchPanel({
       <p className="eyebrow">MODE</p>
       <div className="auth-switch" role="group" aria-label="Private match mode">
         {MODES.map((candidate) => (
-          <button key={candidate} className={candidate === mode ? "active" : ""} disabled={busy} onClick={() => void chooseMode(candidate)}>{candidate}</button>
+          <button
+            key={candidate}
+            className={candidate === mode ? "active" : ""}
+            disabled={busy}
+            aria-label={`Select private mode ${candidate.toLowerCase()}`}
+            aria-pressed={candidate === mode}
+            onClick={() => void chooseMode(candidate)}
+          >
+            {candidate}
+          </button>
         ))}
       </div>
 
       <p className="eyebrow">DIFFICULTY</p>
       <div className="auth-switch" role="group" aria-label="Private match difficulty">
         {DIFFICULTIES.map((candidate) => (
-          <button key={candidate} className={candidate === difficulty ? "active" : ""} disabled={busy} onClick={() => void chooseDifficulty(candidate)}>{candidate}</button>
+          <button
+            key={candidate}
+            className={candidate === difficulty ? "active" : ""}
+            disabled={busy}
+            aria-label={`Select private difficulty ${candidate.toLowerCase()}`}
+            aria-pressed={candidate === difficulty}
+            onClick={() => void chooseDifficulty(candidate)}
+          >
+            {candidate}
+          </button>
         ))}
       </div>
 
