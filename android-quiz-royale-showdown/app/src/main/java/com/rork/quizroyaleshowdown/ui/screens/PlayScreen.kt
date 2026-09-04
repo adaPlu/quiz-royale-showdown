@@ -50,7 +50,6 @@ import com.rork.quizroyaleshowdown.ui.components.PressableSurface
 import com.rork.quizroyaleshowdown.ui.components.TagChip
 import com.rork.quizroyaleshowdown.ui.theme.Arena
 
-/** Dedicated top-level play destination used by the persistent app navigation. */
 @Composable
 fun PlayScreen(
     privateMatchViewModel: PrivateMatchViewModel,
@@ -72,48 +71,19 @@ fun PlayScreen(
                 .padding(horizontal = 20.dp, vertical = 24.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Text(
-                text = "PLAY",
-                style = MaterialTheme.typography.displayLarge,
-                color = Arena.GoldBright,
-                fontSize = 38.sp,
-                letterSpacing = 3.sp
-            )
-            Text(
-                text = "Choose your arena",
-                style = MaterialTheme.typography.titleMedium,
-                color = Arena.TextMid
-            )
-
+            Text(text = "PLAY", style = MaterialTheme.typography.displayLarge, color = Arena.GoldBright, fontSize = 38.sp, letterSpacing = 3.sp)
+            Text(text = "Choose your arena", style = MaterialTheme.typography.titleMedium, color = Arena.TextMid)
             Spacer(Modifier.height(2.dp))
 
-            PlayModeCard(
-                info = MODE_INFO.getValue(GameMode.QUICK),
-                accent = Arena.Gold,
-                icon = Icons.Filled.Bolt,
-                onClick = {
-                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onPlay(GameMode.QUICK)
-                }
-            )
-            PlayModeCard(
-                info = MODE_INFO.getValue(GameMode.TOURNAMENT),
-                accent = Arena.Magenta,
-                icon = Icons.Filled.EmojiEvents,
-                onClick = {
-                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onPlay(GameMode.TOURNAMENT)
-                }
-            )
-            PlayModeCard(
-                info = MODE_INFO.getValue(GameMode.PRACTICE),
-                accent = Arena.Cyan,
-                icon = Icons.Filled.School,
-                onClick = {
-                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onPlay(GameMode.PRACTICE)
-                }
-            )
+            PlayModeCard(MODE_INFO.getValue(GameMode.QUICK), Arena.Gold, Icons.Filled.Bolt) {
+                haptics.performHapticFeedback(HapticFeedbackType.LongPress); onPlay(GameMode.QUICK)
+            }
+            PlayModeCard(MODE_INFO.getValue(GameMode.TOURNAMENT), Arena.Magenta, Icons.Filled.EmojiEvents) {
+                haptics.performHapticFeedback(HapticFeedbackType.LongPress); onPlay(GameMode.TOURNAMENT)
+            }
+            PlayModeCard(MODE_INFO.getValue(GameMode.PRACTICE), Arena.Cyan, Icons.Filled.School) {
+                haptics.performHapticFeedback(HapticFeedbackType.LongPress); onPlay(GameMode.PRACTICE)
+            }
 
             PrivateMatchCard(
                 mode = privateMode,
@@ -181,59 +151,30 @@ private fun PrivateMatchCard(
 
         Text("MODE", color = Arena.TextLow, style = MaterialTheme.typography.labelSmall)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            GameMode.entries.forEach { candidate ->
-                SelectChip(candidate.name, candidate == mode, Arena.Gold) { onMode(candidate) }
-            }
+            GameMode.entries.forEach { candidate -> SelectChip(candidate.name, candidate == mode, Arena.Gold) { onMode(candidate) } }
         }
 
         Text("DIFFICULTY", color = Arena.TextLow, style = MaterialTheme.typography.labelSmall)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            MatchDifficulty.entries.forEach { candidate ->
-                SelectChip(candidate.name, candidate == difficulty, Arena.Violet) { onDifficulty(candidate) }
-            }
+            MatchDifficulty.entries.forEach { candidate -> SelectChip(candidate.name, candidate == difficulty, Arena.Violet) { onDifficulty(candidate) } }
         }
 
         if (roomCode == null) {
-            PressableSurface(
-                onClick = onCreate,
-                enabled = !busy,
-                modifier = Modifier.fillMaxWidth(),
-                background = Arena.Gold.copy(alpha = 0.14f),
-                borderColor = Arena.Gold
-            ) {
+            PressableSurface(onClick = onCreate, enabled = !busy, modifier = Modifier.fillMaxWidth(), background = Arena.Gold.copy(alpha = 0.14f), borderColor = Arena.Gold) {
                 Text(if (busy) "CREATING…" else "CREATE PRIVATE ROOM", modifier = Modifier.padding(14.dp), color = Arena.GoldBright, fontWeight = FontWeight.W800)
             }
         } else {
             Text("ROOM CODE", color = Arena.TextLow, style = MaterialTheme.typography.labelSmall)
             Text(roomCode, color = Arena.GoldBright, fontSize = 30.sp, fontWeight = FontWeight.Black, letterSpacing = 5.sp)
             Text("Share this code. Settings remain host-controlled until players enter.", color = Arena.TextMid, style = MaterialTheme.typography.bodySmall)
-            PressableSurface(
-                onClick = onJoin,
-                enabled = !busy,
-                modifier = Modifier.fillMaxWidth(),
-                background = Arena.Gold.copy(alpha = 0.14f),
-                borderColor = Arena.Gold
-            ) {
+            PressableSurface(onClick = onJoin, enabled = !busy, modifier = Modifier.fillMaxWidth(), background = Arena.Gold.copy(alpha = 0.14f), borderColor = Arena.Gold) {
                 Text("ENTER PRIVATE ARENA", modifier = Modifier.padding(14.dp), color = Arena.GoldBright, fontWeight = FontWeight.W800)
             }
         }
 
         if (roomCode == null) {
-            OutlinedTextField(
-                value = joinCode,
-                onValueChange = onJoinCode,
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                label = { Text("ROOM CODE") },
-                placeholder = { Text("AB2CD3") }
-            )
-            PressableSurface(
-                onClick = onJoin,
-                enabled = joinCode.length == 6 && !busy,
-                modifier = Modifier.fillMaxWidth(),
-                background = Arena.Violet.copy(alpha = 0.12f),
-                borderColor = Arena.Violet
-            ) {
+            OutlinedTextField(value = joinCode, onValueChange = onJoinCode, modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("ROOM CODE") }, placeholder = { Text("AB2CD3") })
+            PressableSurface(onClick = onJoin, enabled = joinCode.length == 6 && !busy, modifier = Modifier.fillMaxWidth(), background = Arena.Violet.copy(alpha = 0.12f), borderColor = Arena.Violet) {
                 Text("JOIN BY CODE", modifier = Modifier.padding(14.dp), color = Arena.TextHi, fontWeight = FontWeight.W800)
             }
         }
@@ -247,7 +188,7 @@ private fun SelectChip(label: String, selected: Boolean, accent: Color, onClick:
     PressableSurface(
         onClick = onClick,
         background = if (selected) accent.copy(alpha = 0.18f) else Arena.SurfaceHi,
-        borderColor = if (selected) accent else Arena.Stroke,
+        borderColor = if (selected) accent else Arena.Outline,
         shape = RoundedCornerShape(12.dp)
     ) {
         Text(label, modifier = Modifier.padding(horizontal = 9.dp, vertical = 7.dp), color = if (selected) accent else Arena.TextMid, fontSize = 11.sp, fontWeight = FontWeight.W700)
@@ -255,26 +196,16 @@ private fun SelectChip(label: String, selected: Boolean, accent: Color, onClick:
 }
 
 @Composable
-private fun PlayModeCard(
-    info: ModeInfo,
-    accent: Color,
-    icon: ImageVector,
-    onClick: () -> Unit
-) {
+private fun PlayModeCard(info: ModeInfo, accent: Color, icon: ImageVector, onClick: () -> Unit) {
     PressableSurface(
         onClick = onClick,
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(1.dp, accent.copy(alpha = 0.42f), RoundedCornerShape(20.dp)),
+        modifier = Modifier.fillMaxWidth().border(1.dp, accent.copy(alpha = 0.42f), RoundedCornerShape(20.dp)),
         background = Arena.Surface.copy(alpha = 0.78f),
         borderColor = Color.Transparent,
         shape = RoundedCornerShape(20.dp)
     ) {
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(accent.copy(alpha = 0.035f))
-                .padding(18.dp),
+            modifier = Modifier.fillMaxWidth().background(accent.copy(alpha = 0.035f)).padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
