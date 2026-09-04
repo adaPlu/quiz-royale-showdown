@@ -29,7 +29,7 @@ export async function handlePrivateMatchAction(
   const roomTicket = await mintTicket(roomId, mode);
   if (!roomTicket) return Response.json({ error: "match_tickets_unavailable" }, { status: 503 });
 
-  const publicBody = { ...result.body, roomTicket };
+  const publicBody: Record<string, unknown> = { ...result.body, roomTicket };
   delete publicBody.hostId;
   return Response.json(publicBody, { status: result.status });
 }
