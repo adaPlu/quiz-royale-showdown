@@ -10,38 +10,63 @@ on:
 
 permissions:
   contents: read
-  packages: read
 
 jobs:
   analyze:
-    name: Analyze (${{ matrix.language }})
+    name: Analyze (${{ matrix.label }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - language: javascript-typescript
-            build-mode: none
+          - language: javascript
+            label: javascript-typescript
+            suite: codeql/javascript-queries:codeql-suites/javascript-security-and-quality.qls
             sarif: javascript-typescript
-          - language: java-kotlin
-            build-mode: none
+          - language: java
+            label: java-kotlin
+            suite: codeql/java-queries:codeql-suites/java-security-and-quality.qls
             sarif: java-kotlin
     steps:
       - uses: actions/checkout@v4
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
-        with:
-          languages: ${{ matrix.language }}
-          build-mode: ${{ matrix.build-mode }}
-      - name: Analyze without repository upload
-        uses: github/codeql-action/analyze@v4
-        with:
-          upload: never
-          output: sarif-results
+
+      - name: Install standalone CodeQL CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          CODEQL_VERSION=2.26.4
+          curl --fail --location --retry 3 \
+            "https://github.com/github/codeql-action/releases/download/codeql-bundle-v${CODEQL_VERSION}/codeql-bundle-linux64.tar.zst" \
+            --output "$RUNNER_TEMP/codeql-bundle.tar.zst"
+          mkdir -p "$RUNNER_TEMP/codeql-bundle"
+          tar --zstd -xf "$RUNNER_TEMP/codeql-bundle.tar.zst" -C "$RUNNER_TEMP/codeql-bundle"
+          echo "$RUNNER_TEMP/codeql-bundle/codeql" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/codeql-bundle/codeql/codeql" version
+
+      - name: Create CodeQL database
+        shell: bash
+        run: >-
+          codeql database create "codeql-db-${{ matrix.sarif }}"
+          --language="${{ matrix.language }}"
+          --source-root=.
+          --build-mode=none
+
+      - name: Analyze CodeQL database
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sarif-results
+          codeql database analyze "codeql-db-${{ matrix.sarif }}" \
+            "${{ matrix.suite }}" \
+            --format=sarif-latest \
+            --output="sarif-results/${{ matrix.sarif }}.sarif" \
+            --threads=0 \
+            --ram=0
+
       - name: Preserve SARIF results
         uses: actions/upload-artifact@v4
         with:
           name: codeql-${{ matrix.sarif }}-sarif
-          path: sarif-results/*.sarif
+          path: sarif-results/${{ matrix.sarif }}.sarif
           if-no-files-found: error
           retention-days: 30
