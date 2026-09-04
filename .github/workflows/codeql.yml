@@ -71,7 +71,7 @@ jobs:
           --language=java
           --source-root=android-quiz-royale-showdown
           --working-dir=android-quiz-royale-showdown
-          --command="./gradlew :app:assembleDebug --stacktrace"
+          --command="./gradlew :app:assembleDebug --stacktrace --rerun-tasks --no-build-cache"
 
       - name: Analyze CodeQL database
         shell: bash
