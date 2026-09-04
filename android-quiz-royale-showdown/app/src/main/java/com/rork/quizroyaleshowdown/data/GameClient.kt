@@ -10,7 +10,11 @@ import io.ktor.client.plugins.websocket.webSocketSession
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.parameter
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
 import io.ktor.client.request.url
+import io.ktor.http.ContentType
+import io.ktor.http.contentType
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.websocket.Frame
 import io.ktor.websocket.WebSocketSession
@@ -20,10 +24,24 @@ import io.ktor.websocket.send
 import kotlinx.coroutines.channels.ClosedReceiveChannelException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.net.URLEncoder
 
 private const val TAG = "GameClient"
+
+@Serializable
+private data class PrivateCreateRequest(val mode: GameMode, val difficulty: MatchDifficulty)
+
+@Serializable
+private data class PrivateJoinRequest(val code: String)
+
+@Serializable
+private data class PrivateUpdateRequest(
+    val code: String,
+    val mode: GameMode,
+    val difficulty: MatchDifficulty
+)
 
 /**
  * Transport for the match protocol: a small HTTP call to find a room, then a
@@ -44,12 +62,42 @@ class GameClient {
 
     private val baseUrl: String get() = Backend.matchHttpBase
 
-    /** Asks the matchmaker which room to join for [mode]. */
+    /** Asks the public matchmaker which room to join for [mode]. */
     suspend fun findMatch(mode: GameMode): MatchmakeResponse {
         return http.get("$baseUrl/matchmake") {
             parameter("mode", mode.name)
         }.body()
     }
+
+    suspend fun createPrivateMatch(
+        mode: GameMode,
+        difficulty: MatchDifficulty,
+        credentials: MatchCredentials
+    ): PrivateMatchResponse = http.post("$baseUrl/private-match/create") {
+        contentType(ContentType.Application.Json)
+        applyCredentials(credentials)
+        setBody(PrivateCreateRequest(mode, difficulty))
+    }.body()
+
+    suspend fun joinPrivateMatch(
+        code: String,
+        credentials: MatchCredentials
+    ): PrivateMatchResponse = http.post("$baseUrl/private-match/join") {
+        contentType(ContentType.Application.Json)
+        applyCredentials(credentials)
+        setBody(PrivateJoinRequest(code.trim().uppercase()))
+    }.body()
+
+    suspend fun updatePrivateMatch(
+        code: String,
+        mode: GameMode,
+        difficulty: MatchDifficulty,
+        credentials: MatchCredentials
+    ): PrivateMatchResponse = http.post("$baseUrl/private-match/update") {
+        contentType(ContentType.Application.Json)
+        applyCredentials(credentials)
+        setBody(PrivateUpdateRequest(code.trim().uppercase(), mode, difficulty))
+    }.body()
 
     /**
      * Opens the match socket and emits every decoded server message until the
@@ -106,6 +154,14 @@ class GameClient {
 
     fun shutdown() {
         runCatching { http.close() }
+    }
+
+    private fun io.ktor.client.request.HttpRequestBuilder.applyCredentials(credentials: MatchCredentials) {
+        credentials.token?.let { header("Authorization", "Bearer $it") }
+        if (credentials.guestId != null && credentials.guestSecret != null) {
+            header("X-Guest-Id", credentials.guestId)
+            header("X-Guest-Secret", credentials.guestSecret)
+        }
     }
 }
 
