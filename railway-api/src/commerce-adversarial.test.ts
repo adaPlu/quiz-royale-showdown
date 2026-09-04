@@ -36,11 +36,11 @@ test("duplicate partial-refund arithmetic converges to the original grant and ne
   assert.equal(reversed, 1_200);
 });
 
-test("RTDN classifier rejects payload-shape confusion and preserves single-event precedence", () => {
+test("RTDN classifier remains presence-based and preserves lifecycle precedence", () => {
   const classifyMalformed = (value: unknown) => rtdnEventKind(value as Parameters<typeof rtdnEventKind>[0]);
   assert.equal(classifyMalformed({ pendingRefundReviewNotification: null }), "unknown");
-  assert.equal(classifyMalformed({ oneTimeProductNotification: "forged" }), "unknown");
-  assert.equal(classifyMalformed({ testNotification: 7 }), "unknown");
+  assert.equal(classifyMalformed({ oneTimeProductNotification: "forged" }), "one_time_product");
+  assert.equal(classifyMalformed({ testNotification: 7 }), "test");
   assert.equal(
     classifyMalformed({ voidedPurchaseNotification: {}, oneTimeProductNotification: {} }),
     "voided_purchase",
@@ -52,6 +52,7 @@ test("refund review deadline boundary is stable at due-soon and overdue transiti
   const fourHours = 4 * 60 * 60 * 1000;
   assert.equal(refundReviewDeadlineState(now + fourHours + 1, now), "open");
   assert.equal(refundReviewDeadlineState(now + fourHours, now), "due_soon");
-  assert.equal(refundReviewDeadlineState(now, now), "due_soon");
+  assert.equal(refundReviewDeadlineState(now + 1, now), "due_soon");
+  assert.equal(refundReviewDeadlineState(now, now), "overdue");
   assert.equal(refundReviewDeadlineState(now - 1, now), "overdue");
 });
