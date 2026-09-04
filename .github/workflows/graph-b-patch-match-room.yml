@@ -1,0 +1,90 @@
+name: Graph B one-shot MatchRoom patch
+
+on:
+  push:
+    branches:
+      - repair/graph-b-private-match-backend
+    paths:
+      - .github/workflows/graph-b-patch-match-room.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: repair/graph-b-private-match-backend
+      - name: Patch authoritative difficulty selection
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path('functions/match-room.ts')
+          text = path.read_text()
+
+          old_import = 'import { buildQuestionSet, type Question } from "./questions";\n'
+          new_import = old_import + 'import { parsePrivateRoomId, type MatchDifficulty } from "./private-match";\n'
+          if old_import not in text:
+              raise SystemExit('questions import seam not found')
+          text = text.replace(old_import, new_import, 1)
+
+          old_state = '''    const cfg = MODE_CONFIG[mode];
+              const selectedQuestions = await this.loadQuestions(mode, cfg.totalRounds);
+          '''
+          new_state = '''    const cfg = MODE_CONFIG[mode];
+              const privateRoom = parsePrivateRoomId(this.ctx.id.name ?? "");
+              const difficulty: MatchDifficulty = privateRoom?.difficulty ?? "MIXED";
+              const selectedQuestions = await this.loadQuestions(mode, cfg.totalRounds, difficulty);
+          '''
+          if old_state not in text:
+              raise SystemExit('ensureState seam not found')
+          text = text.replace(old_state, new_state, 1)
+
+          old_loader = '''  private async loadQuestions(mode: GameMode, count: number): Promise<{ questions: Question[]; fromRailway: boolean }> {
+              if (this.env.RAILWAY_API_URL) {
+                const railway = await selectQuestionsFromRailway(this.env, mode, count).catch(() => null);
+                if (railway?.length === count) return { questions: railway, fromRailway: true };
+                if (this.env.ALLOW_STATIC_QUESTIONS_FALLBACK !== "true") {
+                  throw new Error("Railway question selection failed and static fallback is disabled.");
+                }
+              }
+              return { questions: buildQuestionSet(count), fromRailway: false };
+            }
+          '''
+          new_loader = '''  private async loadQuestions(
+              mode: GameMode,
+              count: number,
+              difficulty: MatchDifficulty = "MIXED",
+            ): Promise<{ questions: Question[]; fromRailway: boolean }> {
+              if (this.env.RAILWAY_API_URL) {
+                const railway = await selectQuestionsFromRailway(this.env, mode, count, difficulty).catch(() => null);
+                if (railway?.length === count) return { questions: railway, fromRailway: true };
+                if (difficulty !== "MIXED") {
+                  throw new Error(`Railway ${difficulty.toLowerCase()} question pool is unavailable.`);
+                }
+                if (this.env.ALLOW_STATIC_QUESTIONS_FALLBACK !== "true") {
+                  throw new Error("Railway question selection failed and static fallback is disabled.");
+                }
+              } else if (difficulty !== "MIXED") {
+                throw new Error(`Railway is required for explicit ${difficulty.toLowerCase()} difficulty matches.`);
+              }
+              return { questions: buildQuestionSet(count), fromRailway: false };
+            }
+          '''
+          if old_loader not in text:
+              raise SystemExit('loadQuestions seam not found')
+          text = text.replace(old_loader, new_loader, 1)
+          path.write_text(text)
+      - name: Remove one-shot workflow and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/graph-b-patch-match-room.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add functions/match-room.ts .github/workflows/graph-b-patch-match-room.yml
+          git commit -m "feat: enforce private match difficulty in MatchRoom"
+          git push origin HEAD:repair/graph-b-private-match-backend
