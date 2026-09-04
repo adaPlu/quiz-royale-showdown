@@ -70,6 +70,7 @@ jobs:
       DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/quizroyale_ci
       PGSSL: disable
       NODE_ENV: test
+      RUN_DATABASE_INTEGRATION_TESTS: "true"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

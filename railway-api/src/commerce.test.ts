@@ -12,6 +12,8 @@ import {
 } from "./commerce.js";
 import { pool } from "./db.js";
 
+const databaseTest = process.env.RUN_DATABASE_INTEGRATION_TESTS === "true" ? test : test.skip;
+
 test("full void reverses the remaining granted entitlement", () => {
   assert.equal(voidReversalAmount(500, 500, 0, null), 500);
   assert.equal(voidReversalAmount(500, 500, 200, null), 300);
@@ -42,7 +44,7 @@ test("pending refund review deadline states are explicit", () => {
   assert.equal(refundReviewDeadlineState(now - 1, now), "overdue");
 });
 
-test("pending refund review RTDN delivery is idempotent by message and token", async () => {
+databaseTest("pending refund review RTDN delivery is idempotent by message and token", async () => {
   const suffix = randomUUID();
   const messageId = `pending-refund-message-${suffix}`;
   const secondMessageId = `pending-refund-message-2-${suffix}`;
@@ -141,7 +143,7 @@ test("billing and refund-review operations are internal-only", async () => {
   }
 });
 
-test("completed refund-review submissions are idempotent without another Google call", async () => {
+databaseTest("completed refund-review submissions are idempotent without another Google call", async () => {
   const previous = process.env.INTERNAL_API_TOKEN;
   process.env.INTERNAL_API_TOKEN = "internal-test-token";
   const suffix = randomUUID();
