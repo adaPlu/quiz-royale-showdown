@@ -24,17 +24,10 @@ data class MatchUiState(
     val match: PublicMatch? = null,
     val you: YouState? = null,
     val errorMessage: String? = null,
-    /** serverNow - localNow, so countdowns stay honest despite clock drift. */
     val clockOffsetMs: Long = 0L,
-    /** Round number the player last saw resolved, used to drive reveal effects. */
     val lastRevealedRound: Int = 0
 )
 
-/**
- * Owns the connection to a single match and projects server broadcasts into
- * UI state. All game rules live on the server; this class never decides who is
- * correct, who scores, or who is eliminated.
- */
 class MatchViewModel(app: Application) : AndroidViewModel(app) {
 
     private val prefs = PlayerPrefs(app)
@@ -49,7 +42,6 @@ class MatchViewModel(app: Application) : AndroidViewModel(app) {
 
     val playerName: String get() = prefs.playerName
 
-    /** A session token wins over a guest id, so a signed-in run always banks. */
     private val credentials: MatchCredentials
         get() {
             val token = prefs.sessionToken
@@ -60,45 +52,46 @@ class MatchViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
 
-    fun startMatch(mode: GameMode) {
+    fun startMatch(mode: GameMode) = startSession { client.findMatch(mode) }
+
+    fun startPrivateMatch(code: String) = startSession {
+        client.joinPrivateMatch(code, credentials).asMatchmakeResponse()
+    }
+
+    private fun startSession(assignmentProvider: suspend () -> MatchmakeResponse) {
         sessionJob?.cancel()
         recordedResult = false
         _uiState.value = MatchUiState(status = ConnectionStatus.MATCHMAKING)
 
         sessionJob = viewModelScope.launch {
             var attempt = 0
-            var matchmake: MatchmakeResponse? = null
+            var assignment: MatchmakeResponse? = null
 
             while (isActive && attempt <= MAX_RECONNECT_ATTEMPTS) {
                 try {
-                    if (matchmake == null) matchmake = client.findMatch(mode)
+                    if (assignment == null) assignment = assignmentProvider()
+                    val activeAssignment = assignment
                     _uiState.update {
                         it.copy(
-                            status = if (attempt == 0) ConnectionStatus.CONNECTING
-                            else ConnectionStatus.RECONNECTING,
+                            status = if (attempt == 0) ConnectionStatus.CONNECTING else ConnectionStatus.RECONNECTING,
                             errorMessage = null
                         )
                     }
 
                     client.connect(
-                        roomId = matchmake.roomId,
-                        roomTicket = matchmake.roomTicket,
+                        roomId = activeAssignment.roomId,
+                        roomTicket = activeAssignment.roomTicket,
                         credentials = credentials,
                         name = prefs.playerName,
-                        mode = mode,
+                        mode = activeAssignment.mode,
                         outbound = outbound
                     ).collect { message -> handleMessage(message) }
 
-                    // The socket ended cleanly. If the match finished there is
-                    // nothing to reconnect to.
                     if (_uiState.value.match?.phase == Phase.FINISHED) return@launch
                     attempt += 1
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    // Ktor can surface transport, HTTP and serialization failures
-                    // through different exception types. Treat them all as a
-                    // recoverable arena-session failure instead of crashing UI.
                     Log.w(TAG, "Match session failure (${e::class.simpleName}): ${e.message}")
                     attempt += 1
                 }
@@ -124,11 +117,7 @@ class MatchViewModel(app: Application) : AndroidViewModel(app) {
             is ServerMessage.State -> {
                 val offset = message.match.serverNow - System.currentTimeMillis()
                 _uiState.update { current ->
-                    val revealed = if (message.match.phase == Phase.REVEAL) {
-                        message.match.roundNumber
-                    } else {
-                        current.lastRevealedRound
-                    }
+                    val revealed = if (message.match.phase == Phase.REVEAL) message.match.roundNumber else current.lastRevealedRound
                     current.copy(
                         status = ConnectionStatus.CONNECTED,
                         match = message.match,
@@ -140,18 +129,12 @@ class MatchViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 if (message.match.phase == Phase.FINISHED) recordResult(message)
             }
-
             is ServerMessage.Error -> {
-                // Protocol rejections are informational; the next STATE frame
-                // still carries the truth, so we never mutate game state here.
                 Log.d(TAG, "Server rejected action ${message.code}: ${message.message}")
                 _uiState.update { it.copy(errorMessage = message.message) }
             }
-
-            is ServerMessage.Pong -> {
-                _uiState.update {
-                    it.copy(clockOffsetMs = message.serverNow - System.currentTimeMillis())
-                }
+            is ServerMessage.Pong -> _uiState.update {
+                it.copy(clockOffsetMs = message.serverNow - System.currentTimeMillis())
             }
         }
     }
@@ -159,10 +142,8 @@ class MatchViewModel(app: Application) : AndroidViewModel(app) {
     private fun recordResult(message: ServerMessage.State) {
         if (recordedResult) return
         recordedResult = true
-
         val you = message.you
         if (message.match.mode == GameMode.PRACTICE) return
-
         if (you.score > prefs.bestScore) prefs.bestScore = you.score
         val place = you.placement
         if (place != null) {
@@ -175,19 +156,14 @@ class MatchViewModel(app: Application) : AndroidViewModel(app) {
     fun submitAnswer(index: Int) {
         val state = _uiState.value
         val question = state.match?.question ?: return
-        if (state.match.phase != Phase.QUESTION) return
-        if (state.you?.answerIndex != null) return
-
-        viewModelScope.launch {
-            outbound.send(ClientMessage.SubmitAnswer(question.id, index))
-        }
+        if (state.match.phase != Phase.QUESTION || state.you?.answerIndex != null) return
+        viewModelScope.launch { outbound.send(ClientMessage.SubmitAnswer(question.id, index)) }
     }
 
     fun usePowerUp(powerUp: PowerUp) {
         val state = _uiState.value
         if (state.match?.phase != Phase.QUESTION) return
         if (state.you?.availablePowerUps?.contains(powerUp) != true) return
-
         viewModelScope.launch { outbound.send(ClientMessage.UsePowerUp(powerUp)) }
     }
 
@@ -200,9 +176,7 @@ class MatchViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun dismissError() {
-        _uiState.update { it.copy(errorMessage = null) }
-    }
+    fun dismissError() { _uiState.update { it.copy(errorMessage = null) } }
 
     override fun onCleared() {
         super.onCleared()
