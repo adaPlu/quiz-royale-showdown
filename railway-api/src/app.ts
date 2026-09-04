@@ -7,6 +7,7 @@ import {
 } from "./commerce.js";
 import { pool } from "./db.js";
 import { handleDifficultyQuestionRequest } from "./difficulty-questions.js";
+import { installGooglePlayVoidedPurchasesFetchGuard } from "./google-play-voided-fetch.js";
 import { recordOperationalFailure, type OperationalFailureCategory } from "./ops-alerts.js";
 import { startSeasonLifecycleReconciler } from "./season-lifecycle.js";
 import { handleRequest } from "./server.js";
@@ -52,6 +53,7 @@ export const appServer = http.createServer(async (request, response) => {
   }
 });
 
+installGooglePlayVoidedPurchasesFetchGuard();
 const stopVoidedPurchaseReconciler = startGooglePlayVoidedPurchaseReconciler();
 const stopPendingRefundReviewAlerting = startGooglePlayPendingRefundReviewAlerting();
 const stopSeasonLifecycleReconciler = startSeasonLifecycleReconciler();
