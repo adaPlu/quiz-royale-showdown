@@ -17,7 +17,9 @@ import {
   Zap,
 } from "lucide-react";
 import {
+  createPrivateMatch,
   findMatch,
+  joinPrivateMatch,
   loadSeason,
   loadStore,
   login,
@@ -27,8 +29,10 @@ import {
   refreshIdentity,
   register,
   restoreIdentity,
+  updatePrivateMatch,
 } from "./api";
 import { CosmeticsPanel, FriendsPanel, LeaderboardPanel } from "./FeaturePanels";
+import { PrivateMatchPanel } from "./PrivateMatchPanel";
 import {
   GUEST_ACTIVITY_WINDOW_MS,
   formatRemaining,
@@ -41,8 +45,10 @@ import type {
   GameMode,
   Identity,
   MainRoute,
+  MatchDifficulty,
   MatchmakeResponse,
   PowerUp,
+  PrivateMatchResponse,
   PublicMatch,
   PublicPlayer,
   ServerMessage,
@@ -97,6 +103,8 @@ export default function AppNext() {
   const [route, setRoute] = useState<MainRoute>("home");
   const [live, setLive] = useState<LiveMatch | null>(null);
   const [joiningMode, setJoiningMode] = useState<GameMode | null>(null);
+  const [privateRoom, setPrivateRoom] = useState<PrivateMatchResponse | null>(null);
+  const [privateBusy, setPrivateBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
 
@@ -111,9 +119,7 @@ export default function AppNext() {
   const heartbeatBusyRef = useRef(false);
 
   useEffect(() => {
-    restoreIdentity()
-      .then(setIdentity)
-      .catch((error: Error) => setMessage(error.message));
+    restoreIdentity().then(setIdentity).catch((error: Error) => setMessage(error.message));
     return () => {
       intentionalCloseRef.current = true;
       if (reconnectTimerRef.current != null) window.clearTimeout(reconnectTimerRef.current);
@@ -135,7 +141,6 @@ export default function AppNext() {
   useEffect(() => {
     if (!identity || identity.kind !== "guest") return;
     const guestId = identity.guest.guestId;
-
     const tick = async () => {
       if (document.visibilityState !== "visible") return;
       if (Date.now() - lastActivityRef.current > GUEST_ACTIVITY_WINDOW_MS) return;
@@ -157,7 +162,6 @@ export default function AppNext() {
         heartbeatBusyRef.current = false;
       }
     };
-
     const interval = window.setInterval(() => void tick(), 30_000);
     return () => window.clearInterval(interval);
   }, [identity?.kind, identity?.kind === "guest" ? identity.guest.guestId : null]);
@@ -168,6 +172,7 @@ export default function AppNext() {
       joinWatchdogRef.current = null;
     }
     setJoiningMode(null);
+    setPrivateBusy(false);
     setConnectionState("offline");
     setMessage(error instanceof Error ? error.message : fallback);
   }
@@ -195,6 +200,7 @@ export default function AppNext() {
               joinWatchdogRef.current = null;
             }
             setJoiningMode(null);
+            setPrivateBusy(false);
             setLive({ match: packet.match, you: packet.you });
             setConnectionState("live");
             finishedRef.current = packet.match.phase === "FINISHED";
@@ -233,31 +239,85 @@ export default function AppNext() {
     }
   }
 
-  async function startMatch(mode: GameMode) {
-    if (!identity || joiningMode) return;
-    setJoiningMode(mode);
+  async function enterAssignment(assignment: MatchmakeResponse) {
+    if (!identity) return;
+    setJoiningMode(assignment.mode);
     setMessage(null);
     setLive(null);
     intentionalCloseRef.current = false;
     finishedRef.current = false;
     hasStateRef.current = false;
     if (joinWatchdogRef.current != null) window.clearTimeout(joinWatchdogRef.current);
-
-    try {
-      const assignment = await findMatch(mode);
-      assignmentRef.current = assignment;
+    assignmentRef.current = assignment;
+    socketRef.current?.close();
+    await connectAssignment(identity, assignment);
+    joinWatchdogRef.current = window.setTimeout(() => {
+      if (hasStateRef.current || intentionalCloseRef.current) return;
+      intentionalCloseRef.current = true;
       socketRef.current?.close();
-      await connectAssignment(identity, assignment);
-      joinWatchdogRef.current = window.setTimeout(() => {
-        if (hasStateRef.current || intentionalCloseRef.current) return;
-        intentionalCloseRef.current = true;
-        socketRef.current?.close();
-        setJoiningMode(null);
-        setConnectionState("offline");
-        setMessage("Arena handshake timed out. Try entering the match again.");
-      }, 20_000);
+      setJoiningMode(null);
+      setPrivateBusy(false);
+      setConnectionState("offline");
+      setMessage("Arena handshake timed out. Try entering the match again.");
+    }, 20_000);
+  }
+
+  async function startMatch(mode: GameMode) {
+    if (!identity || joiningMode) return;
+    setJoiningMode(mode);
+    try {
+      await enterAssignment(await findMatch(mode));
     } catch (error) {
       failConnection(error, "Could not enter the arena.");
+    }
+  }
+
+  async function createPrivateRoom(mode: GameMode, difficulty: MatchDifficulty) {
+    if (!identity || privateBusy) return;
+    setPrivateBusy(true);
+    setMessage(null);
+    try {
+      const room = await createPrivateMatch(identity, mode, difficulty);
+      setPrivateRoom(room);
+      setMessage(`Private room ${room.code} created. Share the code, then enter when ready.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not create private room.");
+    } finally {
+      setPrivateBusy(false);
+    }
+  }
+
+  async function updatePrivateRoom(mode: GameMode, difficulty: MatchDifficulty) {
+    if (!identity || !privateRoom || privateBusy) return;
+    setPrivateBusy(true);
+    setMessage(null);
+    try {
+      setPrivateRoom(await updatePrivateMatch(identity, privateRoom.code, mode, difficulty));
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not update private room.");
+    } finally {
+      setPrivateBusy(false);
+    }
+  }
+
+  async function joinPrivateRoom(code: string) {
+    if (!identity || privateBusy) return;
+    setPrivateBusy(true);
+    setMessage(null);
+    try {
+      await enterAssignment(await joinPrivateMatch(identity, code));
+    } catch (error) {
+      failConnection(error, "Could not join private room.");
+    }
+  }
+
+  async function enterHostedPrivateRoom() {
+    if (!identity || !privateRoom || privateBusy) return;
+    setPrivateBusy(true);
+    try {
+      await enterAssignment(await joinPrivateMatch(identity, privateRoom.code));
+    } catch (error) {
+      failConnection(error, "Could not enter private room.");
     }
   }
 
@@ -271,6 +331,7 @@ export default function AppNext() {
     assignmentRef.current = null;
     setLive(null);
     setJoiningMode(null);
+    setPrivateBusy(false);
     setConnectionState("idle");
     if (identity) refreshIdentity(identity).then(setIdentity).catch(() => undefined);
     setRoute("home");
@@ -287,7 +348,18 @@ export default function AppNext() {
       <a className="skip-link" href="#main-content">Skip to main content</a>
       <main className="screen-shell" id="main-content" tabIndex={-1}>
         {route === "home" && <HomeScreen identity={identity} onIdentity={setIdentity} onNavigate={setRoute} />}
-        {route === "play" && <PlayScreen joiningMode={joiningMode} onPlay={startMatch} />}
+        {route === "play" && (
+          <PlayScreen
+            joiningMode={joiningMode}
+            privateRoom={privateRoom}
+            privateBusy={privateBusy}
+            onPlay={startMatch}
+            onCreatePrivate={createPrivateRoom}
+            onUpdatePrivate={updatePrivateRoom}
+            onJoinPrivate={joinPrivateRoom}
+            onEnterPrivate={enterHostedPrivateRoom}
+          />
+        )}
         {route === "store" && <StoreScreen identity={identity} onIdentity={setIdentity} />}
         {route === "season" && <SeasonScreen identity={identity} />}
         {route === "profile" && <ProfileScreen identity={identity} onIdentity={setIdentity} onMessage={setMessage} />}
@@ -384,20 +456,39 @@ function GuestSessionBanner({ identity, onIdentity, onProfile }: { identity: Ext
   );
 }
 
-function PlayScreen({ joiningMode, onPlay }: { joiningMode: GameMode | null; onPlay: (mode: GameMode) => void }) {
+function PlayScreen({
+  joiningMode,
+  privateRoom,
+  privateBusy,
+  onPlay,
+  onCreatePrivate,
+  onUpdatePrivate,
+  onJoinPrivate,
+  onEnterPrivate,
+}: {
+  joiningMode: GameMode | null;
+  privateRoom: PrivateMatchResponse | null;
+  privateBusy: boolean;
+  onPlay: (mode: GameMode) => void;
+  onCreatePrivate: (mode: GameMode, difficulty: MatchDifficulty) => Promise<void>;
+  onUpdatePrivate: (mode: GameMode, difficulty: MatchDifficulty) => Promise<void>;
+  onJoinPrivate: (code: string) => Promise<void>;
+  onEnterPrivate: () => Promise<void>;
+}) {
   return (
     <ArenaPage title="PLAY" subtitle="Choose your arena">
       <div className="mode-list">
         {(Object.keys(MODE_INFO) as GameMode[]).map((mode) => {
           const info = MODE_INFO[mode];
           return (
-            <button key={mode} className={`mode-card ${info.accent}`} onClick={() => onPlay(mode)} disabled={joiningMode !== null}>
+            <button key={mode} className={`mode-card ${info.accent}`} onClick={() => onPlay(mode)} disabled={joiningMode !== null || privateBusy}>
               <div className="mode-heading">{mode === "QUICK" ? <Bolt aria-hidden="true" /> : mode === "TOURNAMENT" ? <Trophy aria-hidden="true" /> : <Medal aria-hidden="true" />}<span><strong>{info.title}</strong><small>{info.tagline}</small></span></div>
               <p>{info.description}</p><span className="enter-label" aria-live="polite">{joiningMode === mode ? "FINDING ARENA…" : "ENTER ARENA →"}</span>
             </button>
           );
         })}
       </div>
+      <PrivateMatchPanel room={privateRoom} busy={privateBusy} onCreate={onCreatePrivate} onUpdate={onUpdatePrivate} onJoin={onJoinPrivate} onEnter={onEnterPrivate} />
     </ArenaPage>
   );
 }
@@ -519,12 +610,7 @@ function MatchScreen({ live, socket, connectionState, onExit }: { live: LiveMatc
 function MatchAppearanceTags({ player }: { player: PublicPlayer }) {
   const appearance = player.appearance;
   if (!appearance) return null;
-  const tags = [
-    appearance.title?.displayName,
-    appearance.badge?.displayName,
-    appearance.avatarFrame?.displayName,
-    appearance.banner?.displayName,
-  ].filter((value): value is string => Boolean(value));
+  const tags = [appearance.title?.displayName, appearance.badge?.displayName, appearance.avatarFrame?.displayName, appearance.banner?.displayName].filter((value): value is string => Boolean(value));
   if (tags.length === 0) return null;
   return <small className="match-appearance" aria-label={`Equipped cosmetics: ${tags.join(", ")}`}>{tags.map((tag) => <em key={tag}>{tag}</em>)}</small>;
 }
