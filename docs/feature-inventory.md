@@ -25,15 +25,26 @@
 - Protected internal billing diagnostics and manual voided-purchase reconciliation endpoint.
 - Safe production health reporting for PostgreSQL, Redis fallback state, billing configuration, RTDN configuration, deploy version, and active season.
 - Google Play reviewer account provisioning only when a strong explicit reviewer password is configured.
+- Cross-client private-room verification covering host create/update/enter, join-by-code, fresh room assignments/tickets, guest credential propagation, and Android assignment parity.
+- Bounded private-match soak/adversarial coverage: 20,000 room metadata round trips, 25,000 difficulty mapping iterations, malformed room rejection, and commerce/refund invariants.
+- Subtle cosmetic presentation motion using the existing Arena palette and layout, including a `prefers-reduced-motion` fallback.
+- Railway production services are sourced from canonical `main`.
+- Bounded operational failure-rate detection with category windows, cooldowns, and HTTPS webhook delivery support.
 
 ## Remaining Product/Operations Work
 
 - Configure the Google Play / Pub/Sub provider side of RTDN and matching Railway audience/service-account variables.
-- Switch the Railway production source branch from the transitional branch to canonical `main`.
-- Broader multiplayer load/soak testing and adversarial commerce testing.
-- More production-quality bespoke cosmetic artwork and animation.
-- External alert delivery for abnormal API, matchmaking, database, and commerce failure rates.
+- Expand the bespoke production cosmetic artwork/content set.
+- Configure `OPS_ALERT_WEBHOOK_URL` in Railway to activate external API, matchmaking, database, and commerce alert delivery.
 - Ongoing economy balancing, seasonal content, and trivia-content quality review.
+
+## Operational Alerting
+
+- `OPS_ALERT_WEBHOOK_URL`: HTTPS destination that receives JSON operational alerts. Leave unset to keep delivery disabled.
+- `OPS_ALERT_FAILURE_THRESHOLD`: failures required inside one category window before delivery; defaults to `5`.
+- `OPS_ALERT_WINDOW_MS`: rolling failure-rate window; defaults to `60000`.
+- `OPS_ALERT_COOLDOWN_MS`: per-category delivery cooldown; defaults to `300000`.
+- Alert payloads contain only service/category/count/timing/status summaries and deployment metadata; request bodies, authorization headers, guest secrets, and provider credentials are never included.
 
 ## Reviewer Account
 
