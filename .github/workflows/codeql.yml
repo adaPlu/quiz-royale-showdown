@@ -10,7 +10,6 @@ on:
 
 permissions:
   contents: read
-  security-events: write
   packages: read
 
 jobs:
@@ -23,14 +22,26 @@ jobs:
         include:
           - language: javascript-typescript
             build-mode: none
+            sarif: javascript-typescript
           - language: java-kotlin
             build-mode: none
+            sarif: java-kotlin
     steps:
       - uses: actions/checkout@v4
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
-      - name: Analyze
-        uses: github/codeql-action/analyze@v3
+      - name: Analyze without repository upload
+        uses: github/codeql-action/analyze@v4
+        with:
+          upload: never
+          output: sarif-results
+      - name: Preserve SARIF results
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-${{ matrix.sarif }}-sarif
+          path: sarif-results/*.sarif
+          if-no-files-found: error
+          retention-days: 30
