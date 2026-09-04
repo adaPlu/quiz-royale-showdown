@@ -1,0 +1,100 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "23 9 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: javascript
+            label: javascript-typescript
+            suite: codeql/javascript-queries:codeql-suites/javascript-security-and-quality.qls
+            sarif: javascript-typescript
+          - language: java
+            label: java-kotlin
+            suite: codeql/java-queries:codeql-suites/java-security-and-quality.qls
+            sarif: java-kotlin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java for Kotlin extraction
+        if: matrix.language == 'java'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle for Kotlin extraction
+        if: matrix.language == 'java'
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install standalone CodeQL CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          CODEQL_VERSION=2.26.4
+          curl --fail --location --retry 3 \
+            "https://github.com/github/codeql-action/releases/download/codeql-bundle-v${CODEQL_VERSION}/codeql-bundle-linux64.tar.zst" \
+            --output "$RUNNER_TEMP/codeql-bundle.tar.zst"
+          mkdir -p "$RUNNER_TEMP/codeql-bundle"
+          tar --zstd -xf "$RUNNER_TEMP/codeql-bundle.tar.zst" -C "$RUNNER_TEMP/codeql-bundle"
+          echo "$RUNNER_TEMP/codeql-bundle/codeql" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/codeql-bundle/codeql/codeql" version
+
+      - name: Create CodeQL database (JavaScript/TypeScript)
+        if: matrix.language == 'javascript'
+        shell: bash
+        run: >-
+          codeql database create "codeql-db-${{ matrix.sarif }}"
+          --language="${{ matrix.language }}"
+          --source-root=.
+          --build-mode=none
+
+      - name: Create CodeQL database (Java/Kotlin)
+        if: matrix.language == 'java'
+        shell: bash
+        run: >-
+          codeql database create "codeql-db-${{ matrix.sarif }}"
+          --language=java
+          --source-root=android-quiz-royale-showdown
+          --working-dir=android-quiz-royale-showdown
+          --command="./gradlew :app:assembleDebug --stacktrace --rerun-tasks --no-build-cache"
+
+      - name: Stop Gradle daemon before analysis
+        if: matrix.language == 'java'
+        working-directory: android-quiz-royale-showdown
+        shell: bash
+        run: ./gradlew --stop
+
+      - name: Analyze CodeQL database
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sarif-results
+          codeql database analyze "codeql-db-${{ matrix.sarif }}" \
+            "${{ matrix.suite }}" \
+            --format=sarif-latest \
+            --output="sarif-results/${{ matrix.sarif }}.sarif" \
+            --threads=2 \
+            --ram=4096
+
+      - name: Preserve SARIF results
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-${{ matrix.sarif }}-sarif
+          path: sarif-results/${{ matrix.sarif }}.sarif
+          if-no-files-found: error
+          retention-days: 30
