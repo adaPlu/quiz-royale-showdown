@@ -60,8 +60,17 @@ test("browser socket tickets reject tampering", async () => {
     powerUpCharges: 1,
   }, 1_000);
   assert(ticket);
-  const tampered = `${ticket.slice(0, -1)}${ticket.endsWith("a") ? "b" : "a"}`;
-  assert.equal(await verifySocketTicket(env, tampered, "room-a", "QUICK", 2_000), null);
+
+  const [encoded, signature] = ticket.split(".");
+  assert(encoded && signature);
+
+  const payloadTampered = `${encoded[0] === "a" ? "b" : "a"}${encoded.slice(1)}.${signature}`;
+  assert.equal(await verifySocketTicket(env, payloadTampered, "room-a", "QUICK", 2_000), null);
+
+  const signatureIndex = Math.min(5, signature.length - 2);
+  const replacement = signature[signatureIndex] === "a" ? "b" : "a";
+  const signatureTampered = `${encoded}.${signature.slice(0, signatureIndex)}${replacement}${signature.slice(signatureIndex + 1)}`;
+  assert.equal(await verifySocketTicket(env, signatureTampered, "room-a", "QUICK", 2_000), null);
 });
 
 test("production ticket minting requires explicit match room secret", async () => {
