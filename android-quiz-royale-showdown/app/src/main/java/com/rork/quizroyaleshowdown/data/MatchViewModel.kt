@@ -39,6 +39,7 @@ class MatchViewModel(app: Application) : AndroidViewModel(app) {
 
     private var sessionJob: Job? = null
     private var recordedResult = false
+    private var pendingPrivateCode: String? = null
 
     val playerName: String get() = prefs.playerName
 
@@ -52,10 +53,17 @@ class MatchViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
 
-    fun startMatch(mode: GameMode) = startSession { client.findMatch(mode) }
+    fun preparePrivateMatch(code: String) {
+        pendingPrivateCode = code.trim().uppercase().takeIf { it.length == 6 }
+    }
 
-    fun startPrivateMatch(code: String) = startSession {
-        client.joinPrivateMatch(code, credentials).asMatchmakeResponse()
+    fun startMatch(mode: GameMode) {
+        val privateCode = pendingPrivateCode.also { pendingPrivateCode = null }
+        if (privateCode != null) {
+            startSession { client.joinPrivateMatch(privateCode, credentials).asMatchmakeResponse() }
+        } else {
+            startSession { client.findMatch(mode) }
+        }
     }
 
     private fun startSession(assignmentProvider: suspend () -> MatchmakeResponse) {
