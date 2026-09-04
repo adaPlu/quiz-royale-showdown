@@ -14,7 +14,7 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const action = privateMatchAction(url.pathname);
-    if (!action) return worker.fetch(request, env, ctx);
+    if (!action) return worker.fetch(request, env);
 
     const origin = request.headers.get("Origin")?.trim() || null;
     if (!isBrowserOriginAllowed(origin, env)) return new Response("origin not allowed", { status: 403 });
