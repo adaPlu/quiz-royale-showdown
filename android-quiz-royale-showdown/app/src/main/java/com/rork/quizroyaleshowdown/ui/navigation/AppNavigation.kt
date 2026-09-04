@@ -36,6 +36,7 @@ import com.rork.quizroyaleshowdown.data.AuthViewModel
 import com.rork.quizroyaleshowdown.data.GameMode
 import com.rork.quizroyaleshowdown.data.LeaderboardViewModel
 import com.rork.quizroyaleshowdown.data.MatchViewModel
+import com.rork.quizroyaleshowdown.data.PrivateMatchViewModel
 import com.rork.quizroyaleshowdown.data.SeasonViewModel
 import com.rork.quizroyaleshowdown.data.StoreViewModel
 import com.rork.quizroyaleshowdown.ui.screens.AuthMode
@@ -57,6 +58,7 @@ private const val ROUTE_LEADERBOARD = "leaderboard"
 private const val ROUTE_STORE = "store"
 private const val ROUTE_SEASON = "season"
 private const val ROUTE_MATCH = "match/{mode}"
+private const val ROUTE_PRIVATE_MATCH = "match/private/{code}"
 
 private data class MainDestination(
     val route: String,
@@ -77,26 +79,14 @@ fun AppNavigation() {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
-
-    // Hoisted to the activity scope so every screen reads one identity, and a
-    // register/login on the auth screen is instantly visible on the home screen.
     val authViewModel: AuthViewModel = viewModel()
-
-    // Keep the commerce reconciler activity-scoped too. It connects to Play and
-    // queries unfinished one-time purchases as soon as a persisted registered
-    // session starts, rather than waiting for the player to reopen the Store.
     val storeViewModel: StoreViewModel = viewModel()
 
-    // Keep-alive and presence loops run only while the app is actually visible.
-    // A backgrounded app must not hold a guest id alive — otherwise the 30-minute
-    // idle limit would never be reached and the warning could never appear.
     LifecycleResumeEffect(authViewModel) {
         authViewModel.onForeground()
         onPauseOrDispose { authViewModel.onBackground() }
     }
 
-    // The persistent main nav is deliberately hidden only for focused auth and
-    // active-match flows. Everywhere else, Store remains one tap away.
     val showMainNavigation = currentRoute != null &&
         !currentRoute.startsWith("match") &&
         !currentRoute.startsWith("auth")
@@ -104,8 +94,6 @@ fun AppNavigation() {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            // Any touch anywhere counts as activity. Observed in the Initial pass
-            // so it never consumes the event or interferes with child gestures.
             .pointerInput(Unit) {
                 awaitPointerEventScope {
                     while (true) {
@@ -155,8 +143,11 @@ fun AppNavigation() {
                 }
 
                 composable(ROUTE_PLAY) {
+                    val privateMatchViewModel: PrivateMatchViewModel = viewModel()
                     PlayScreen(
-                        onPlay = { mode -> navController.navigate("match/${mode.name}") }
+                        privateMatchViewModel = privateMatchViewModel,
+                        onPlay = { mode -> navController.navigate("match/${mode.name}") },
+                        onJoinPrivate = { code -> navController.navigate("match/private/${code.uppercase()}") }
                     )
                 }
 
@@ -166,13 +157,10 @@ fun AppNavigation() {
                 ) { entry ->
                     val raw = entry.arguments?.getString("mode") ?: AuthMode.REGISTER.name
                     val mode = runCatching { AuthMode.valueOf(raw) }.getOrDefault(AuthMode.REGISTER)
-
                     AuthScreen(
                         viewModel = authViewModel,
                         initialMode = mode,
-                        onDone = {
-                            navController.popBackStack(ROUTE_HOME, inclusive = false)
-                        },
+                        onDone = { navController.popBackStack(ROUTE_HOME, inclusive = false) },
                         onBack = { navController.popBackStack() }
                     )
                 }
@@ -189,23 +177,14 @@ fun AppNavigation() {
 
                 composable(ROUTE_LEADERBOARD) {
                     val leaderboardViewModel: LeaderboardViewModel = viewModel()
-                    LeaderboardScreen(
-                        viewModel = leaderboardViewModel,
-                        onBack = { navController.popBackStack() }
-                    )
+                    LeaderboardScreen(viewModel = leaderboardViewModel, onBack = { navController.popBackStack() })
                 }
 
                 composable(ROUTE_STORE) {
-                    // This destination is saved/restored by the bottom nav. Refresh
-                    // whenever it becomes active so a sign-out/account switch never
-                    // exposes balances or ownership from the previous session.
-                    // Refresh global identity after leaving because a store purchase
-                    // can change power-up charges and server-side entitlements.
                     LifecycleResumeEffect(storeViewModel) {
                         storeViewModel.refresh()
                         onPauseOrDispose { authViewModel.refresh() }
                     }
-
                     StoreScreen(
                         viewModel = storeViewModel,
                         onBack = { navController.popBackStack() },
@@ -219,6 +198,29 @@ fun AppNavigation() {
                         viewModel = seasonViewModel,
                         onBack = { navController.popBackStack() },
                         onRegister = { navController.navigate("auth/${AuthMode.REGISTER.name}") }
+                    )
+                }
+
+                composable(
+                    route = ROUTE_PRIVATE_MATCH,
+                    arguments = listOf(navArgument("code") { type = NavType.StringType })
+                ) { entry ->
+                    val code = entry.arguments?.getString("code")?.uppercase().orEmpty()
+                    val matchViewModel: MatchViewModel = viewModel()
+                    matchViewModel.preparePrivateMatch(code)
+
+                    LifecycleResumeEffect(code) {
+                        authViewModel.setInMatch(GameMode.QUICK)
+                        onPauseOrDispose { authViewModel.setInMatch(null) }
+                    }
+
+                    MatchScreen(
+                        mode = GameMode.QUICK,
+                        viewModel = matchViewModel,
+                        onExit = {
+                            authViewModel.refresh()
+                            navController.popBackStack(ROUTE_HOME, inclusive = false)
+                        }
                     )
                 }
 
@@ -263,12 +265,7 @@ private fun MainNavigationBar(
             NavigationBarItem(
                 selected = selected,
                 onClick = { onNavigate(destination.route) },
-                icon = {
-                    Icon(
-                        imageVector = destination.icon,
-                        contentDescription = destination.label
-                    )
-                },
+                icon = { Icon(imageVector = destination.icon, contentDescription = destination.label) },
                 label = { Text(destination.label) },
                 alwaysShowLabel = true,
                 colors = NavigationBarItemDefaults.colors(

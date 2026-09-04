@@ -1,4 +1,5 @@
 export type GameMode = "QUICK" | "TOURNAMENT" | "PRACTICE";
+export type MatchDifficulty = "EASY" | "MEDIUM" | "HARD" | "MIXED";
 export type MainRoute = "home" | "play" | "store" | "season" | "profile";
 export type PowerUp = "FIFTY_FIFTY" | "SHIELD" | "DOUBLE_DOWN";
 
@@ -43,15 +44,8 @@ export type FriendInvite = {
   respondedAt?: number | null;
 };
 
-export type FriendInvitesEnvelope = {
-  incoming: FriendInvite[];
-  outgoing: FriendInvite[];
-};
-
-export type UserSearchResult = {
-  userId: string;
-  username: string;
-};
+export type FriendInvitesEnvelope = { incoming: FriendInvite[]; outgoing: FriendInvite[] };
+export type UserSearchResult = { userId: string; username: string };
 
 export type UserProfile = {
   userId: string;
@@ -94,10 +88,7 @@ export type StoreItem = {
   owned: boolean;
 };
 
-export type StoreItemsEnvelope = {
-  balances: VirtualCurrencyBalances;
-  items: StoreItem[];
-};
+export type StoreItemsEnvelope = { balances: VirtualCurrencyBalances; items: StoreItem[] };
 
 export type CosmeticItem = {
   cosmeticId: string;
@@ -109,9 +100,7 @@ export type CosmeticItem = {
   equipped: boolean;
 };
 
-export type CosmeticsEnvelope = {
-  cosmetics: CosmeticItem[];
-};
+export type CosmeticsEnvelope = { cosmetics: CosmeticItem[] };
 
 export type Season = {
   seasonId: string;
@@ -129,11 +118,7 @@ export type SeasonProgress = {
   updatedAt: number;
 };
 
-export type CurrentSeasonEnvelope = {
-  season: Season;
-  progress: SeasonProgress;
-  hasSeasonPass?: boolean;
-};
+export type CurrentSeasonEnvelope = { season: Season; progress: SeasonProgress; hasSeasonPass?: boolean };
 
 export type LeaderboardEntry = {
   rank: number;
@@ -161,6 +146,13 @@ export type MatchmakeResponse = {
   lobbyEndsAt: number;
 };
 
+export type PrivateMatchResponse = MatchmakeResponse & {
+  code: string;
+  difficulty: MatchDifficulty;
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type PublicQuestion = {
   id: string;
   category: string;
@@ -169,11 +161,7 @@ export type PublicQuestion = {
   options: string[];
 };
 
-export type MatchAppearanceCosmetic = {
-  cosmeticId: string;
-  displayName: string;
-};
-
+export type MatchAppearanceCosmetic = { cosmeticId: string; displayName: string };
 export type MatchAppearance = {
   avatarFrame?: MatchAppearanceCosmetic | null;
   banner?: MatchAppearanceCosmetic | null;
