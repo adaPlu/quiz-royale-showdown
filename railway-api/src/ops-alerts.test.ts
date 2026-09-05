@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { OperationalFailureTracker, type OperationalAlert } from "./ops-alerts.js";
+import { OperationalFailureTracker, buildOperationalAlertWebhookPayload, type OperationalAlert } from "./ops-alerts.js";
 
 test("failure tracker alerts only after the configured rate threshold", async () => {
   const alerts: OperationalAlert[] = [];
@@ -36,4 +36,47 @@ test("old failures age out and summaries are bounded to safe single-line text", 
   assert.equal(alerts.length, 1);
   assert.equal(alerts[0]?.summary.includes("\n"), false);
   assert.ok((alerts[0]?.summary.length ?? 0) <= 300);
+});
+
+test("buildOperationalAlertWebhookPayload creates Slack-compatible payload with top-level text field", () => {
+  const previousCommit = process.env.RAILWAY_GIT_COMMIT_SHA;
+  const previousEnvironment = process.env.RAILWAY_ENVIRONMENT_NAME;
+  process.env.RAILWAY_GIT_COMMIT_SHA = "abcdef1234567890";
+  process.env.RAILWAY_ENVIRONMENT_NAME = "production";
+
+  try {
+    const alert: OperationalAlert = {
+      service: "quiz-royale-api",
+      category: "database",
+      count: 7,
+      windowMs: 60_000,
+      occurredAt: 1_700_000_000_000,
+      summary: "Database connection timeout",
+    };
+
+    const payload = buildOperationalAlertWebhookPayload(alert);
+
+    assert.equal(typeof payload.text, "string");
+    const text = payload.text as string;
+    assert.ok(text.length > 0);
+    assert.equal(text.includes("\n"), false);
+    assert.equal(text.includes("\r"), false);
+    assert.ok(text.length <= 300);
+
+    assert.equal(payload.event, "quiz_royale_operational_alert");
+    assert.equal(payload.service, alert.service);
+    assert.equal(payload.category, alert.category);
+    assert.equal(payload.count, alert.count);
+    assert.equal(payload.windowMs, alert.windowMs);
+    assert.equal(payload.occurredAt, alert.occurredAt);
+    assert.equal(payload.summary, alert.summary);
+
+    assert.equal(payload.deployCommit, "abcdef1234567890".slice(0, 12));
+    assert.equal(payload.environment, "production");
+  } finally {
+    if (previousCommit === undefined) delete process.env.RAILWAY_GIT_COMMIT_SHA;
+    else process.env.RAILWAY_GIT_COMMIT_SHA = previousCommit;
+    if (previousEnvironment === undefined) delete process.env.RAILWAY_ENVIRONMENT_NAME;
+    else process.env.RAILWAY_ENVIRONMENT_NAME = previousEnvironment;
+  }
 });
