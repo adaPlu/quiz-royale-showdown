@@ -1,0 +1,58 @@
+name: Dependency Wave A Generator
+
+on:
+  push:
+    branches:
+      - deps/wave-a-safe-updates
+
+permissions:
+  contents: write
+
+jobs:
+  update-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout wave branch
+        uses: actions/checkout@v4
+        with:
+          ref: deps/wave-a-safe-updates
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            functions/package-lock.json
+            railway-api/package-lock.json
+
+      - name: Update Worker tooling within current majors
+        working-directory: functions
+        run: npm install --save-dev wrangler@4.129.0 @cloudflare/workers-types@5.20260903.1
+
+      - name: Verify Worker tests and typecheck
+        working-directory: functions
+        run: npm test
+
+      - name: Update Railway pg within current major
+        working-directory: railway-api
+        run: npm install pg@8.23.0
+
+      - name: Verify Railway build and tests
+        working-directory: railway-api
+        run: |
+          npm run build
+          npm test
+
+      - name: Commit generated manifests and lockfiles
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add functions/package.json functions/package-lock.json railway-api/package.json railway-api/package-lock.json
+          if git diff --cached --quiet; then
+            echo "No dependency changes generated."
+            exit 0
+          fi
+          git commit -m "chore: update safe dependency wave A"
+          git push origin HEAD:deps/wave-a-safe-updates
