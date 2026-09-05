@@ -58,6 +58,18 @@ function configuredPositiveInt(name: string, fallback: number): number {
   return Number.isFinite(raw) && raw > 0 ? raw : fallback;
 }
 
+export function buildOperationalAlertWebhookPayload(alert: OperationalAlert): Record<string, unknown> {
+  const text = `[${alert.category}] ${alert.summary}`.replace(/[\r\n]+/g, " ").trim().slice(0, 300);
+
+  return {
+    text,
+    event: "quiz_royale_operational_alert",
+    ...alert,
+    deployCommit: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 12) ?? null,
+    environment: process.env.RAILWAY_ENVIRONMENT_NAME ?? null,
+  };
+}
+
 async function deliverWebhook(alert: OperationalAlert): Promise<void> {
   const raw = process.env.OPS_ALERT_WEBHOOK_URL?.trim();
   if (!raw) return;
@@ -77,12 +89,7 @@ async function deliverWebhook(alert: OperationalAlert): Promise<void> {
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      event: "quiz_royale_operational_alert",
-      ...alert,
-      deployCommit: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 12) ?? null,
-      environment: process.env.RAILWAY_ENVIRONMENT_NAME ?? null,
-    }),
+    body: JSON.stringify(buildOperationalAlertWebhookPayload(alert)),
     signal: AbortSignal.timeout(5_000),
   }).catch((error) => {
     console.warn("Operational alert webhook delivery failed", (error as Error)?.message);
