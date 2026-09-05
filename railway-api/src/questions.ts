@@ -55,11 +55,11 @@ export function normalizeQuestionInput(
   if (!category) return null;
 
   const options = input.options.map(normalizeText);
-  if (new Set(options.map((option) => option.toLowerCase())).size !== options.length) return null;
+  const text = normalizeText(input.text);
+  if (!passesQuestionContentQuality(text, options)) return null;
   const correct = input.correctIndex ?? input.correct;
   if (correct === undefined || correct < 0 || correct >= options.length) return null;
 
-  const text = normalizeText(input.text);
   const contentHash = questionContentHash(category, input.difficulty, text, options, correct);
   const now = Date.now();
   return {
@@ -75,6 +75,17 @@ export function normalizeQuestionInput(
     createdAt: now,
     updatedAt: now,
   };
+}
+
+export function passesQuestionContentQuality(text: string, options: string[]): boolean {
+  const normalizedText = normalizeText(text).toLowerCase();
+  const normalizedOptions = options.map((option) => normalizeText(option).toLowerCase());
+  if (new Set(normalizedOptions).size !== normalizedOptions.length) return false;
+  if (normalizedOptions.includes(normalizedText)) return false;
+
+  const placeholderAnswers = new Set(["a", "b", "c", "d"]);
+  if (normalizedOptions.length === 4 && normalizedOptions.every((option) => placeholderAnswers.has(option))) return false;
+  return true;
 }
 
 export function rowToQuestion(row: {
