@@ -66,6 +66,12 @@ import {
 } from "./question-service.js";
 import { explicitReviewPassword } from "./runtime-config.js";
 import { googlePlayHealthStatus } from "./commerce.js";
+import {
+  matchEconomyReward,
+  parseEconomyReportWindow,
+  seasonXpGain,
+  summarizeEconomyLedger,
+} from "./economy.js";
 
 const PORT = Number.parseInt(process.env.PORT ?? "8080", 10);
 const PASSWORD_RESET_TTL_MS = 30 * 60 * 1000;
@@ -272,6 +278,7 @@ export async function handleRequest(request: http.IncomingMessage, response: htt
     if (request.method === "GET" && url.pathname === "/leaderboard") {
       return sendResponse(response, await cachedLeaderboard(url.search || "default", () => leaderboard(url)));
     }
+    if (request.method === "GET" && url.pathname === "/internal/economy-report") return sendResponse(response, await internalEconomyReport(request, url));
     if (request.method === "POST" && url.pathname === "/internal/report") return sendResponse(response, await internalReport(request));
     if (request.method === "POST" && url.pathname === "/internal/questions/select") return sendResponse(response, await internalQuestionSelect(request));
     if (request.method === "POST" && url.pathname === "/internal/questions/usage") return sendResponse(response, await internalQuestionUsage(request));
@@ -1057,6 +1064,59 @@ async function leaderboard(url: URL): Promise<ApiResponse> {
   } satisfies LeaderboardDto];
 }
 
+async function internalEconomyReport(request: http.IncomingMessage, url: URL): Promise<ApiResponse> {
+  if (!authorizedInternal(request)) return [401, { error: "unauthorized" }];
+  const window = parseEconomyReportWindow(url.searchParams.get("windowMs"));
+  if (!window) return [400, { error: "invalid_window" }];
+
+  const ledger = await pool.query<{
+    currency: string;
+    reason: string;
+    delta: string | number;
+    event_count: string | number;
+  }>(
+    `SELECT currency, reason, COALESCE(SUM(delta), 0) AS delta, COUNT(*) AS event_count
+     FROM currency_ledger
+     WHERE created_at >= $1 AND created_at <= $2
+     GROUP BY currency, reason
+     ORDER BY currency, reason`,
+    [window.from, window.to],
+  );
+  const purchases = await pool.query<{
+    currency: string;
+    purchase_count: string | number;
+    spend: string | number;
+  }>(
+    `SELECT currency, COUNT(*) AS purchase_count, COALESCE(SUM(price), 0) AS spend
+     FROM store_purchases
+     WHERE purchased_at >= $1 AND purchased_at <= $2
+     GROUP BY currency
+     ORDER BY currency`,
+    [window.from, window.to],
+  );
+
+  const summary = summarizeEconomyLedger(ledger.rows.map((row) => ({
+    currency: row.currency,
+    reason: row.reason,
+    delta: Number(row.delta),
+    eventCount: Number(row.event_count),
+  })));
+  const storePurchases: Record<string, { purchases: number; spend: number }> = {
+    coins: { purchases: 0, spend: 0 },
+    gems: { purchases: 0, spend: 0 },
+    seasonalTickets: { purchases: 0, spend: 0 },
+  };
+  for (const row of purchases.rows) {
+    if (!(row.currency in storePurchases)) continue;
+    storePurchases[row.currency] = {
+      purchases: Number(row.purchase_count),
+      spend: Number(row.spend),
+    };
+  }
+
+  return [200, { window, ...summary, storePurchases }];
+}
+
 async function internalReport(request: http.IncomingMessage): Promise<ApiResponse> {
   if (!authorizedInternal(request)) return [401, { error: "unauthorized" }];
   const body = await safeJson(request);
@@ -1458,7 +1518,7 @@ async function getSeasonProgress(db: DbClient, userId: string, seasonId: string)
 async function awardSeasonProgressForMatch(client: DbClient, user: UserRow, outcome: MatchOutcome): Promise<void> {
   const season = await getActiveSeason(client);
   if (!season) return;
-  const xpGain = Math.max(25, Math.floor(outcome.score / 10) + outcome.correctAnswers * 10 + (outcome.won ? 100 : 0));
+  const xpGain = seasonXpGain(outcome.score, outcome.correctAnswers, outcome.won);
   const previous = await getSeasonProgress(client, user.user_id, season.season_id);
   const xp = previous.xp + xpGain;
   const level = Math.max(1, Math.floor(xp / SEASON_XP_PER_LEVEL) + 1);
@@ -1480,8 +1540,7 @@ async function awardSeasonProgressForMatch(client: DbClient, user: UserRow, outc
 
 async function awardCurrencyForMatch(client: DbClient, user: UserRow, outcome: MatchOutcome): Promise<void> {
   if (normalizeEntitlements(user.entitlements).unlimitedCurrency) return;
-  const coins = Math.max(10, Math.floor(outcome.score / 20) + outcome.correctAnswers * 5 + (outcome.won ? 75 : 0));
-  const gems = outcome.won ? 1 : 0;
+  const { coins, gems } = matchEconomyReward(outcome.score, outcome.correctAnswers, outcome.won);
   const coinCredit = await adjustCurrency(client, user, "coins", coins, "match_reward", outcome.matchId);
   if (coinCredit.ok) user.currency_balances = coinCredit.balances;
   if (gems > 0) {
