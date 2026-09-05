@@ -31,6 +31,30 @@ test("question normalization rejects duplicate answer options", () => {
   assert.equal(question, null);
 });
 
+test("question normalization rejects an answer option that simply repeats the prompt", () => {
+  const question = normalizeQuestionInput({
+    category: "Science",
+    difficulty: "easy",
+    text: "Which planet is known as the Red Planet?",
+    options: ["Which planet is known as the Red Planet?", "Mars", "Venus", "Mercury"],
+    correctIndex: 1,
+  }, "openai", "active");
+
+  assert.equal(question, null);
+});
+
+test("question normalization rejects degenerate one-character answer options", () => {
+  const question = normalizeQuestionInput({
+    category: "Science",
+    difficulty: "easy",
+    text: "Which answer identifies the correct chemical element?",
+    options: ["A", "B", "C", "D"],
+    correctIndex: 2,
+  }, "openai", "active");
+
+  assert.equal(question, null);
+});
+
 test("generated question schema rejects malformed batches", () => {
   const parsed = generatedQuestionBatchSchema.safeParse({
     questions: [{
