@@ -11,7 +11,7 @@
     "test": "node --test dist/**/*.test.js"
   },
   "dependencies": {
-    "pg": "^8.13.1",
+    "pg": "^8.23.0",
     "redis": "^6.2.1",
     "zod": "^3.25.76"
   },
