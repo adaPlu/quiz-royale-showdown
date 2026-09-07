@@ -39,7 +39,7 @@ jobs:
 
       - name: Set up Gradle for Kotlin extraction
         if: matrix.language == 'java'
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Install standalone CodeQL CLI
         shell: bash
