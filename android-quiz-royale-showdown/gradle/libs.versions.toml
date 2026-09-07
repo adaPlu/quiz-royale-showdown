@@ -1,16 +1,16 @@
 [versions]
-agp = "8.13.2"
+agp = "9.2.1"
 kotlin = "2.3.10"
 ksp = "2.3.9"
 coreKtx = "1.17.0"
 lifecycleRuntime = "2.10.0"
 activityCompose = "1.12.4"
 composeBom = "2026.02.01"
-navigationCompose = "2.9.7"
+navigationCompose = "2.10.0"
 securityCrypto = "1.1.0"
 serialization = "1.11.0"
 ktor = "3.5.2"
-coil = "3.4.0"
+coil = "3.6.1"
 koin = "4.1.1"
 billing = "9.1.0"
 
@@ -43,7 +43,6 @@ google-play-billing = { group = "com.android.billingclient", name = "billing", v
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
-kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
