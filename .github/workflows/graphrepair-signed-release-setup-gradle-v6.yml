@@ -49,7 +49,9 @@ jobs:
           git diff --exit-code 8bb62cc4595cabd6a84d3463fbf0e4725f2782ee -- . ':(exclude).github/workflows/graphrepair-signed-release-setup-gradle-v6.yml'
           grep -q 'uses: gradle/actions/setup-gradle@v6' .github/workflows/android-signed-release.yml
           test "$(grep -Rho 'uses: gradle/actions/setup-gradle@v6' .github/workflows | wc -l)" -ge 6
-          if grep -R 'uses: gradle/actions/setup-gradle@v4' .github/workflows --exclude='graphrepair-signed-release-setup-java-v6.yml'; then
+          if grep -R 'uses: gradle/actions/setup-gradle@v4' .github/workflows \
+            --exclude='graphrepair-signed-release-setup-gradle-v6.yml' \
+            --exclude='graphrepair-signed-release-setup-java-v6.yml'; then
             echo "Found stale setup-gradle@v4 reference."
             exit 1
           fi
