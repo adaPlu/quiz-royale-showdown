@@ -1,0 +1,150 @@
+name: graphRepair Signed 1.9 Upload Artifact v7
+
+on:
+  push:
+    branches:
+      - graphrepair/signed-release-upload-artifact-v7
+
+permissions:
+  contents: read
+
+jobs:
+  signed-release:
+    name: Build, sign, verify, and upload 1.9 with artifact v7
+    runs-on: ubuntu-latest
+    env:
+      EXPO_PUBLIC_RAILWAY_API_URL: https://railway-api-production-5772.up.railway.app
+      EXPO_PUBLIC_RORK_FUNCTIONS_URL: https://quiz-royale-functions.adapluguez.workers.dev
+      ANDROID_RELEASE_SIGNING_REQUIRED: "true"
+      ANDROID_KEY_ALIAS: quizroyale-upload
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.QUIZ_ROYALE_ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.QUIZ_ROYALE_ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.QUIZ_ROYALE_ANDROID_KEY_PASSWORD }}
+      EXPECTED_UPLOAD_CERT_SHA256: 15:97:2C:8E:35:E5:BB:6F:EB:BC:81:3A:31:2E:19:50:02:9C:88:1A:93:C3:F7:63:8D:D2:70:CF:8D:E7:61:B4
+
+    defaults:
+      run:
+        working-directory: android-quiz-royale-showdown
+
+    steps:
+      - name: Checkout exact validation branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Assert application source matches upload-artifact-v7 PR head
+        shell: bash
+        working-directory: .
+        run: |
+          set -euo pipefail
+          git diff --exit-code fbe4bcc04d4727c92cc16c1088d4827dde7cc8cd -- . ':(exclude).github/workflows/graphrepair-signed-release-upload-artifact-v7.yml'
+          grep -q 'uses: actions/upload-artifact@v7' .github/workflows/android-signed-release.yml
+
+      - name: Verify Gradle wrapper version
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --version | tee "$RUNNER_TEMP/gradle-version.txt"
+          grep -q 'Gradle 9.7.1' "$RUNNER_TEMP/gradle-version.txt"
+
+      - name: Validate signing secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${ANDROID_KEYSTORE_BASE64:-}" || { echo "Missing QUIZ_ROYALE_ANDROID_KEYSTORE_BASE64"; exit 1; }
+          test -n "${ANDROID_KEYSTORE_PASSWORD:-}" || { echo "Missing QUIZ_ROYALE_ANDROID_KEYSTORE_PASSWORD"; exit 1; }
+          test -n "${ANDROID_KEY_PASSWORD:-}" || { echo "Missing QUIZ_ROYALE_ANDROID_KEY_PASSWORD"; exit 1; }
+
+      - name: Reconstruct and verify upload keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+          KEYSTORE_PATH="$RUNNER_TEMP/quizroyale-upload.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          chmod 600 "$KEYSTORE_PATH"
+          echo "ANDROID_KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+
+          ACTUAL_FINGERPRINT="$(
+            keytool -list -v \
+              -keystore "$KEYSTORE_PATH" \
+              -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+              -alias "$ANDROID_KEY_ALIAS" |
+              awk '/SHA256:/{print $NF; exit}'
+          )"
+          test "$ACTUAL_FINGERPRINT" = "$EXPECTED_UPLOAD_CERT_SHA256" || {
+            echo "Upload certificate fingerprint does not match the approved Quiz Royale key."
+            exit 1
+          }
+
+      - name: Verify 1.9 version
+        run: |
+          grep 'versionCode = 1787428688' app/build.gradle.kts
+          grep 'versionName = "1.9"' app/build.gradle.kts
+
+      - name: Test and build signed release
+        run: ./gradlew clean :app:testDebugUnitTest :app:assembleRelease :app:bundleRelease --stacktrace
+
+      - name: Verify APK and AAB signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/release/app-release.apk"
+          AAB="app/build/outputs/bundle/release/app-release.aab"
+          test -f "$APK"
+          test -f "$AAB"
+
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -n "$APKSIGNER"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+
+          EXPECTED_COMPACT="$(printf '%s' "$EXPECTED_UPLOAD_CERT_SHA256" | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+          APK_FINGERPRINT="$(
+            "$APKSIGNER" verify --print-certs "$APK" |
+              awk -F': ' '/certificate SHA-256 digest/{print $NF; exit}' |
+              tr '[:upper:]' '[:lower:]'
+          )"
+          test "$APK_FINGERPRINT" = "$EXPECTED_COMPACT" || {
+            echo "APK signer certificate does not match the approved Quiz Royale upload key."
+            exit 1
+          }
+
+          jarsigner -verify "$AAB" >/dev/null
+          AAB_FINGERPRINT="$(
+            keytool -printcert -jarfile "$AAB" |
+              awk '/SHA256:/{print $NF; exit}'
+          )"
+          test "$AAB_FINGERPRINT" = "$EXPECTED_UPLOAD_CERT_SHA256" || {
+            echo "AAB signer certificate does not match the approved Quiz Royale upload key."
+            exit 1
+          }
+
+      - name: Collect signed release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifacts
+          cp app/build/outputs/apk/release/app-release.apk release-artifacts/QuizRoyaleShowdown-v1.9-code1787428688-upload-artifact-v7-release-signed.apk
+          cp app/build/outputs/bundle/release/app-release.aab release-artifacts/QuizRoyaleShowdown-v1.9-code1787428688-upload-artifact-v7-release-signed.aab
+          cd release-artifacts
+          sha256sum QuizRoyaleShowdown-v1.9-code1787428688-upload-artifact-v7-release-signed.* > SHA256SUMS.txt
+          ls -lh
+
+      - name: Upload signed Android validation artifacts with v7
+        uses: actions/upload-artifact@v7
+        with:
+          name: graphrepair-quiz-royale-v1.9-upload-artifact-v7-signed
+          path: android-quiz-royale-showdown/release-artifacts/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove reconstructed keystore
+        if: always()
+        shell: bash
+        run: rm -f "${ANDROID_KEYSTORE_PATH:-$RUNNER_TEMP/quizroyale-upload.jks}"
