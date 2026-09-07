@@ -54,7 +54,7 @@ jobs:
           sha256sum release-artifacts/* > release-artifacts/SHA256SUMS.txt
 
       - name: Upload fresh AAB
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: quiz-royale-v1.9-code1787428688-fresh-unsigned
           path: android-quiz-royale-showdown/release-artifacts/*
