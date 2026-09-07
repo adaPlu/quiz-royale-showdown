@@ -118,7 +118,7 @@ jobs:
           ls -lh
 
       - name: Upload signed Android artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: quiz-royale-v1.9-code1787428688-signed
           path: android-quiz-royale-showdown/release-artifacts/*
