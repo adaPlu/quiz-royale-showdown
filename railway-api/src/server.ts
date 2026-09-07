@@ -216,7 +216,7 @@ const matchOutcomeSchema = z.object({
   score: z.number().int().nonnegative().max(1_000_000),
   correctAnswers: z.number().int().nonnegative(),
   powerUpsUsed: z.number().int().nonnegative().max(100),
-  categoryPoints: z.record(z.number().int().nonnegative().max(1_000_000)),
+  categoryPoints: z.record(z.string(), z.number().int().nonnegative().max(1_000_000)),
   recordWinLoss: z.boolean(),
   competitiveRewards: z.boolean().optional(),
 });
