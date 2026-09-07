@@ -1,6 +1,5 @@
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
 }
@@ -61,7 +60,7 @@ requireReleaseValue("EXPO_PUBLIC_RORK_FUNCTIONS_URL", rorkFunctionsUrl)
 
 android {
     namespace = "com.rork.quizroyaleshowdown"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.rork.quizroyaleshowdown"
