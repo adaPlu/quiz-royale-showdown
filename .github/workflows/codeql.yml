@@ -28,7 +28,7 @@ jobs:
             suite: codeql/java-queries:codeql-suites/java-security-and-quality.qls
             sarif: java-kotlin
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Java for Kotlin extraction
         if: matrix.language == 'java'
