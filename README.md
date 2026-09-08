@@ -36,7 +36,7 @@ versionName:   1.9
 versionCode:   1787428688
 minSdk:        26
 targetSdk:     36
-compileSdk:    36
+compileSdk:    37
 ```
 
 ---
@@ -753,15 +753,17 @@ This matrix should be green before integrating gameplay, commerce, authenticatio
 
 # Production Web Release Workflow
 
-The repository contains:
+Production web multiplayer deployment is orchestrated by:
 
 ```text
-.github/workflows/release-web-production.yml
+.github/workflows/deploy-web-pages.yml
 ```
 
-It is intentionally manual (`workflow_dispatch`) and coordinates the web multiplayer release.
+On relevant `main` changes, this workflow runs the full application validation matrix and both CodeQL language lanes first. Only after both reusable gates succeed does it call `.github/workflows/release-web-production.yml`. The reusable release workflow also remains available through `workflow_dispatch` for an intentional manual release.
 
-Its production sequence is:
+Railway API auto-deploy is separately scoped to `railway-api/**` and `railway.json`; its account-level GitHub check-suite wait must still be enabled in Railway to guarantee CI-before-Railway deployment.
+
+Its release sequence is:
 
 ```text
 validate credentials
@@ -863,7 +865,7 @@ build + tests + review
 PR back to main
 ```
 
-`Railway-API-Implementation` is transitional only and should mirror `main` until the Railway service source branch is switched to `main`.
+Railway production tracks `main` directly. `Railway-API-Implementation` is a historical transitional branch and is not the production source.
 
 Several historical `agent/*`, audit, build, and deployment-probe branches may remain in the repository. They should not be merged merely because they exist; many were intentionally temporary CI or release-validation branches.
 
@@ -920,10 +922,12 @@ For paid coins/gems:
 
 The 1.9 release closes the remaining P1 chargeback-operations gap from the 1.8 reassessment. Authenticated pending-refund RTDNs now create a durable 24-hour operator review queue, explicit protected APPROVE / DECLINE / NEUTRAL actions call Google Play ReviewRefund, and repeated submissions are idempotent. Android 1.9 also adds a secret-backed signed-release workflow that verifies the approved upload certificate before and after build.
 
-Remaining production work is P2 / polish:
+Remaining release work includes provider-side P1 certification plus P2 polish:
 
+- configure and verify the authenticated Google Play RTDN/Pub/Sub push identity;
+- configure and test an approved operational alert receiver;
+- complete a live Play test purchase, RTDN redelivery/idempotency check, and refund/void verification;
 - deeper adversarial commerce and multiplayer load/soak testing;
-- external alert delivery beyond the built-in pending-refund deadline logs;
 - more bespoke cosmetic artwork and animation;
 - ongoing balance, seasonal-content, and trivia-quality tuning.
 
