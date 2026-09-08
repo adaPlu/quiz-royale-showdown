@@ -66,6 +66,7 @@ import {
 } from "./question-service.js";
 import { explicitReviewPassword } from "./runtime-config.js";
 import { googlePlayHealthStatus } from "./commerce.js";
+import { sendOperationalTestAlert } from "./ops-alerts.js";
 import {
   matchEconomyReward,
   parseEconomyReportWindow,
@@ -279,6 +280,7 @@ export async function handleRequest(request: http.IncomingMessage, response: htt
       return sendResponse(response, await cachedLeaderboard(url.search || "default", () => leaderboard(url)));
     }
     if (request.method === "GET" && url.pathname === "/internal/economy-report") return sendResponse(response, await internalEconomyReport(request, url));
+    if (request.method === "POST" && url.pathname === "/internal/ops-alert-test") return sendResponse(response, await internalOpsAlertTest(request));
     if (request.method === "POST" && url.pathname === "/internal/report") return sendResponse(response, await internalReport(request));
     if (request.method === "POST" && url.pathname === "/internal/questions/select") return sendResponse(response, await internalQuestionSelect(request));
     if (request.method === "POST" && url.pathname === "/internal/questions/usage") return sendResponse(response, await internalQuestionUsage(request));
@@ -1062,6 +1064,19 @@ async function leaderboard(url: URL): Promise<ApiResponse> {
     yourPoints,
     totalRanked: Number(total.rows[0]?.count ?? 0),
   } satisfies LeaderboardDto];
+}
+
+async function internalOpsAlertTest(request: http.IncomingMessage): Promise<ApiResponse> {
+  if (!authorizedInternal(request)) return [401, { error: "unauthorized" }];
+
+  const result = await sendOperationalTestAlert();
+  if (result.ok) return [200, { ok: true, delivered: true, status: result.status }];
+  if (result.error === "not_configured") return [503, { error: "ops_alert_not_configured" }];
+  return [502, {
+    error: "ops_alert_delivery_failed",
+    reason: result.error,
+    status: result.status ?? null,
+  }];
 }
 
 async function internalEconomyReport(request: http.IncomingMessage, url: URL): Promise<ApiResponse> {

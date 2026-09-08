@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { OperationalFailureTracker, buildOperationalAlertWebhookPayload, type OperationalAlert } from "./ops-alerts.js";
+import { OperationalFailureTracker, buildOperationalAlertWebhookPayload, sendOperationalTestAlert, type OperationalAlert } from "./ops-alerts.js";
 
 test("failure tracker alerts only after the configured rate threshold", async () => {
   const alerts: OperationalAlert[] = [];
@@ -78,5 +78,56 @@ test("buildOperationalAlertWebhookPayload creates Slack-compatible payload with 
     else process.env.RAILWAY_GIT_COMMIT_SHA = previousCommit;
     if (previousEnvironment === undefined) delete process.env.RAILWAY_ENVIRONMENT_NAME;
     else process.env.RAILWAY_ENVIRONMENT_NAME = previousEnvironment;
+  }
+});
+
+
+test("sendOperationalTestAlert posts one bounded HTTPS certification payload", async () => {
+  const previousWebhook = process.env.OPS_ALERT_WEBHOOK_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.OPS_ALERT_WEBHOOK_URL = "https://alerts.example.test/hook";
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    calls.push({ url: String(input), init });
+    return new Response(null, { status: 204 });
+  }) as typeof fetch;
+
+  try {
+    const result = await sendOperationalTestAlert(1_700_000_000_000);
+    assert.deepEqual(result, { ok: true, status: 204 });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.url, "https://alerts.example.test/hook");
+    assert.equal(calls[0]?.init?.method, "POST");
+    assert.deepEqual(calls[0]?.init?.headers, { "Content-Type": "application/json" });
+    const payload = JSON.parse(String(calls[0]?.init?.body)) as Record<string, unknown>;
+    assert.equal(payload.event, "quiz_royale_operational_alert");
+    assert.equal(payload.summary, "Quiz Royale operational alert delivery test");
+    assert.equal(payload.category, "api");
+    assert.equal(payload.count, 1);
+    assert.equal(payload.occurredAt, 1_700_000_000_000);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousWebhook === undefined) delete process.env.OPS_ALERT_WEBHOOK_URL;
+    else process.env.OPS_ALERT_WEBHOOK_URL = previousWebhook;
+  }
+});
+
+test("sendOperationalTestAlert reports missing configuration without network access", async () => {
+  const previousWebhook = process.env.OPS_ALERT_WEBHOOK_URL;
+  const previousFetch = globalThis.fetch;
+  delete process.env.OPS_ALERT_WEBHOOK_URL;
+  let called = false;
+  globalThis.fetch = (async () => {
+    called = true;
+    return new Response(null, { status: 204 });
+  }) as typeof fetch;
+
+  try {
+    assert.deepEqual(await sendOperationalTestAlert(1), { ok: false, error: "not_configured" });
+    assert.equal(called, false);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousWebhook === undefined) delete process.env.OPS_ALERT_WEBHOOK_URL;
+    else process.env.OPS_ALERT_WEBHOOK_URL = previousWebhook;
   }
 });
