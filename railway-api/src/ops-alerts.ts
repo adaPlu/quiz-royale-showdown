@@ -11,6 +11,14 @@ export type OperationalAlert = {
 
 type DeliverAlert = (alert: OperationalAlert) => Promise<void>;
 
+export type OperationalAlertDeliveryResult =
+  | { ok: true; status: number }
+  | {
+      ok: false;
+      error: "not_configured" | "invalid_url" | "https_required" | "network_error" | "rejected";
+      status?: number;
+    };
+
 export class OperationalFailureTracker {
   private readonly failures = new Map<OperationalFailureCategory, number[]>();
   private readonly lastDeliveredAt = new Map<OperationalFailureCategory, number>();
@@ -70,35 +78,48 @@ export function buildOperationalAlertWebhookPayload(alert: OperationalAlert): Re
   };
 }
 
-async function deliverWebhook(alert: OperationalAlert): Promise<void> {
+async function deliverWebhookResult(alert: OperationalAlert): Promise<OperationalAlertDeliveryResult> {
   const raw = process.env.OPS_ALERT_WEBHOOK_URL?.trim();
-  if (!raw) return;
+  if (!raw) return { ok: false, error: "not_configured" };
 
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    console.warn("Operational alert webhook URL is invalid");
-    return;
+    return { ok: false, error: "invalid_url" };
   }
-  if (url.protocol !== "https:") {
-    console.warn("Operational alert webhook must use HTTPS");
-    return;
-  }
+  if (url.protocol !== "https:") return { ok: false, error: "https_required" };
 
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(buildOperationalAlertWebhookPayload(alert)),
     signal: AbortSignal.timeout(5_000),
-  }).catch((error) => {
-    console.warn("Operational alert webhook delivery failed", (error as Error)?.message);
-    return null;
-  });
+  }).catch(() => null);
 
-  if (response && !response.ok) {
-    console.warn("Operational alert webhook rejected delivery", response.status);
-  }
+  if (!response) return { ok: false, error: "network_error" };
+  if (!response.ok) return { ok: false, error: "rejected", status: response.status };
+  return { ok: true, status: response.status };
+}
+
+async function deliverWebhook(alert: OperationalAlert): Promise<void> {
+  const result = await deliverWebhookResult(alert);
+  if (result.ok || result.error === "not_configured") return;
+  if (result.error === "invalid_url") console.warn("Operational alert webhook URL is invalid");
+  else if (result.error === "https_required") console.warn("Operational alert webhook must use HTTPS");
+  else if (result.error === "network_error") console.warn("Operational alert webhook delivery failed");
+  else console.warn("Operational alert webhook rejected delivery", result.status);
+}
+
+export async function sendOperationalTestAlert(now = Date.now()): Promise<OperationalAlertDeliveryResult> {
+  return deliverWebhookResult({
+    service: process.env.RAILWAY_SERVICE_NAME?.trim() || "quiz-royale-api",
+    category: "api",
+    count: 1,
+    windowMs: 0,
+    occurredAt: now,
+    summary: "Quiz Royale operational alert delivery test",
+  });
 }
 
 const defaultTracker = new OperationalFailureTracker(
