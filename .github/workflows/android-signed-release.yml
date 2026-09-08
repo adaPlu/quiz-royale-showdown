@@ -3,8 +3,6 @@ name: Android 1.9 Signed Release
 on:
   workflow_dispatch:
   push:
-    branches:
-      - "release/signed-final-main-16d7a498"
     tags:
       - "v1.9*"
 
