@@ -7,8 +7,6 @@ on:
     paths:
       - "functions/**"
       - "webapp/**"
-      - "railway-api/**"
-      - "android-quiz-royale-showdown/**"
       - ".github/scripts/live-web-multiplayer-smoke.mjs"
       - ".github/workflows/deploy-web-pages.yml"
       - ".github/workflows/release-web-production.yml"
