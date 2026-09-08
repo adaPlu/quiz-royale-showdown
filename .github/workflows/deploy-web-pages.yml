@@ -7,9 +7,13 @@ on:
     paths:
       - "functions/**"
       - "webapp/**"
+      - "railway-api/**"
+      - "android-quiz-royale-showdown/**"
       - ".github/scripts/live-web-multiplayer-smoke.mjs"
       - ".github/workflows/deploy-web-pages.yml"
       - ".github/workflows/release-web-production.yml"
+      - ".github/workflows/ui-web-test.yml"
+      - ".github/workflows/codeql.yml"
   workflow_dispatch:
 
 permissions:
@@ -17,6 +21,18 @@ permissions:
   deployments: write
 
 jobs:
+  validation:
+    name: Full application validation gate
+    uses: ./.github/workflows/ui-web-test.yml
+
+  security:
+    name: CodeQL security gate
+    uses: ./.github/workflows/codeql.yml
+
   release:
+    name: Release only after validation gates
+    needs:
+      - validation
+      - security
     uses: ./.github/workflows/release-web-production.yml
     secrets: inherit
