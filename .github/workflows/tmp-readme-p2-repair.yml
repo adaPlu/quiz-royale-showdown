@@ -1,0 +1,49 @@
+name: Temporary README P2 Repair
+
+on:
+  push:
+    branches:
+      - docs/p2-readme-drift
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.event.head_commit.message != 'docs: sync README with current release state'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: docs/p2-readme-drift
+      - name: Repair README drift
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('README.md')
+          text = path.read_text()
+
+          replacements = {
+              'compileSdk:    36': 'compileSdk:    37',
+              '''The repository contains:\n\n```text\n.github/workflows/release-web-production.yml\n```\n\nIt is intentionally manual (`workflow_dispatch`) and coordinates the web multiplayer release.\n\nIts production sequence is:''': '''Production web multiplayer deployment is orchestrated by:\n\n```text\n.github/workflows/deploy-web-pages.yml\n```\n\nOn relevant `main` changes, this workflow runs the full application validation matrix and both CodeQL language lanes first. Only after both reusable gates succeed does it call `.github/workflows/release-web-production.yml`. The reusable release workflow also remains available through `workflow_dispatch` for an intentional manual release.\n\nRailway API auto-deploy is separately scoped to `railway-api/**` and `railway.json`; its account-level GitHub check-suite wait must still be enabled in Railway to guarantee CI-before-Railway deployment.\n\nIts release sequence is:''',
+              '`Railway-API-Implementation` is transitional only and should mirror `main` until the Railway service source branch is switched to `main`.': 'Railway production tracks `main` directly. `Railway-API-Implementation` is a historical transitional branch and is not the production source.',
+              'Remaining production work is P2 / polish:\n\n- deeper adversarial commerce and multiplayer load/soak testing;\n- external alert delivery beyond the built-in pending-refund deadline logs;': 'Remaining release work includes provider-side P1 certification plus P2 polish:\n\n- configure and verify the authenticated Google Play RTDN/Pub/Sub push identity;\n- configure and test an approved operational alert receiver;\n- complete a live Play test purchase, RTDN redelivery/idempotency check, and refund/void verification;\n- deeper adversarial commerce and multiplayer load/soak testing;'
+          }
+
+          for old, new in replacements.items():
+              if old not in text:
+                  raise SystemExit(f'Expected README text not found: {old[:80]!r}')
+              text = text.replace(old, new, 1)
+
+          path.write_text(text)
+      - name: Commit README repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add README.md
+          git diff --cached --check
+          git commit -m 'docs: sync README with current release state'
+          git push origin HEAD:docs/p2-readme-drift
