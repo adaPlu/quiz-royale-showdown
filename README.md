@@ -32,8 +32,8 @@ A custom production web origin may also be deployed through the prepared Cloudfl
 
 ```text
 applicationId: com.rork.quizroyaleshowdown
-versionName:   1.9
-versionCode:   1787428688
+versionName:   2.0
+versionCode:   1787428691
 minSdk:        26
 targetSdk:     36
 compileSdk:    37
@@ -922,16 +922,15 @@ For paid coins/gems:
 
 The 1.9 release closes the remaining P1 chargeback-operations gap from the 1.8 reassessment. Authenticated pending-refund RTDNs now create a durable 24-hour operator review queue, explicit protected APPROVE / DECLINE / NEUTRAL actions call Google Play ReviewRefund, and repeated submissions are idempotent. Android 1.9 also adds a secret-backed signed-release workflow that verifies the approved upload certificate before and after build.
 
-Remaining release work includes provider-side P1 certification plus P2 polish:
+Provider RTDN and operational-alert delivery are now certified in production. Remaining release work is:
 
-- configure and verify the authenticated Google Play RTDN/Pub/Sub push identity;
-- configure and test an approved operational alert receiver;
-- complete a live Play test purchase, RTDN redelivery/idempotency check, and refund/void verification;
-- deeper adversarial commerce and multiplayer load/soak testing;
-- more bespoke cosmetic artwork and animation;
-- ongoing balance, seasonal-content, and trivia-quality tuning.
+- enable CI-before-deploy governance for Railway and verify main-branch protection;
+- complete a live Play license-tester purchase, RTDN redelivery/idempotency check, and refund/void verification;
+- run the final `/Gaudit`;
+- complete the Play Console 2.0 rollout;
+- continue deeper adversarial commerce/multiplayer soak testing and P2 visual/content polish.
 
-The signed 1.9 workflow requires the repository signing secrets before it can emit Play-uploadable APK/AAB artifacts; the keystore itself must never be committed.
+The signed 2.0 workflow requires the repository signing secrets before it can emit Play-uploadable APK/AAB artifacts; the keystore itself must never be committed.
 
 These are release-operations and polish tasks rather than missing core architecture.
 
