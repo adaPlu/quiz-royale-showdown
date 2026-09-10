@@ -71,7 +71,7 @@ jobs:
 
       - name: Verify 2.0 version
         run: |
-          grep 'versionCode = 1787428689' app/build.gradle.kts
+          grep 'versionCode = 1787428690' app/build.gradle.kts
           grep 'versionName = "2.0"' app/build.gradle.kts
 
       - name: Test and build signed release
@@ -116,16 +116,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-artifacts
-          cp app/build/outputs/apk/release/app-release.apk release-artifacts/QuizRoyaleShowdown-v2.0-code1787428689-release-signed.apk
-          cp app/build/outputs/bundle/release/app-release.aab release-artifacts/QuizRoyaleShowdown-v2.0-code1787428689-release-signed.aab
+          cp app/build/outputs/apk/release/app-release.apk release-artifacts/QuizRoyaleShowdown-v2.0-code1787428690-release-signed.apk
+          cp app/build/outputs/bundle/release/app-release.aab release-artifacts/QuizRoyaleShowdown-v2.0-code1787428690-release-signed.aab
           cd release-artifacts
-          sha256sum QuizRoyaleShowdown-v2.0-code1787428689-release-signed.* > SHA256SUMS.txt
+          sha256sum QuizRoyaleShowdown-v2.0-code1787428690-release-signed.* > SHA256SUMS.txt
           ls -lh
 
       - name: Upload signed Android artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: quiz-royale-v2.0-code1787428689-signed
+          name: quiz-royale-v2.0-code1787428690-signed
           path: android-quiz-royale-showdown/release-artifacts/*
           if-no-files-found: error
           retention-days: 30
