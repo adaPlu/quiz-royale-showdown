@@ -1,4 +1,4 @@
-name: Android 1.9 Signed Release
+name: Android 2.0 Signed Release
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches:
       - main
     tags:
-      - "v1.9*"
+      - "v2.0*"
     paths:
       - "android-quiz-royale-showdown/app/build.gradle.kts"
       - ".github/workflows/android-signed-release.yml"
@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   signed-release:
-    name: Build and verify signed 1.9 APK/AAB
+    name: Build and verify signed 2.0 APK/AAB
     runs-on: ubuntu-latest
     env:
       EXPO_PUBLIC_RAILWAY_API_URL: https://railway-api-production-5772.up.railway.app
@@ -69,10 +69,10 @@ jobs:
             exit 1
           }
 
-      - name: Verify 1.9 version
+      - name: Verify 2.0 version
         run: |
-          grep 'versionCode = 1787428690' app/build.gradle.kts
-          grep 'versionName = "1.9"' app/build.gradle.kts
+          grep 'versionCode = 1787428691' app/build.gradle.kts
+          grep 'versionName = "2.0"' app/build.gradle.kts
 
       - name: Test and build signed release
         run: ./gradlew clean :app:testDebugUnitTest :app:assembleRelease :app:bundleRelease --stacktrace
@@ -116,16 +116,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-artifacts
-          cp app/build/outputs/apk/release/app-release.apk release-artifacts/QuizRoyaleShowdown-v1.9-code1787428690-release-signed.apk
-          cp app/build/outputs/bundle/release/app-release.aab release-artifacts/QuizRoyaleShowdown-v1.9-code1787428690-release-signed.aab
+          cp app/build/outputs/apk/release/app-release.apk release-artifacts/QuizRoyaleShowdown-v2.0-code1787428691-release-signed.apk
+          cp app/build/outputs/bundle/release/app-release.aab release-artifacts/QuizRoyaleShowdown-v2.0-code1787428691-release-signed.aab
           cd release-artifacts
-          sha256sum QuizRoyaleShowdown-v1.9-code1787428690-release-signed.* > SHA256SUMS.txt
+          sha256sum QuizRoyaleShowdown-v2.0-code1787428691-release-signed.* > SHA256SUMS.txt
           ls -lh
 
       - name: Upload signed Android artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: quiz-royale-v1.9-code1787428690-signed
+          name: quiz-royale-v2.0-code1787428691-signed
           path: android-quiz-royale-showdown/release-artifacts/*
           if-no-files-found: error
           retention-days: 30
