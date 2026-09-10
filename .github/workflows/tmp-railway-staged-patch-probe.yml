@@ -1,0 +1,106 @@
+name: Temporary Railway Staged Patch Probe
+
+on:
+  push:
+    branches:
+      - ops/railway-staged-patch-probe
+    paths:
+      - ".github/workflows/tmp-railway-staged-patch-probe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Read-only Railway GraphQL probe
+    runs-on: ubuntu-latest
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_ENVIRONMENT_ID: ed846463-c956-4087-a993-8eb72b6ade4a
+    steps:
+      - name: Query staged-change shape and check-suite schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          endpoint = "https://backboard.railway.com/graphql/v2"
+          api_token = os.environ.get("RAILWAY_API_TOKEN", "").strip()
+          project_token = os.environ.get("RAILWAY_TOKEN", "").strip()
+          env_id = os.environ["RAILWAY_ENVIRONMENT_ID"]
+
+          if api_token:
+              auth_headers = {"Authorization": f"Bearer {api_token}"}
+              auth_kind = "account/workspace token"
+          elif project_token:
+              auth_headers = {"Project-Access-Token": project_token}
+              auth_kind = "project token"
+          else:
+              raise SystemExit("No Railway API credential is available to this workflow")
+
+          def gql(query, variables=None):
+              payload = json.dumps({"query": query, "variables": variables or {}}).encode()
+              headers = {"Content-Type": "application/json", **auth_headers}
+              request = urllib.request.Request(endpoint, data=payload, headers=headers, method="POST")
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  result = json.load(response)
+              if result.get("errors"):
+                  raise SystemExit("Railway GraphQL returned errors: " + json.dumps(result["errors"]))
+              return result.get("data")
+
+          staged_data = gql(
+              "query environmentStagedChanges($environmentId: String!) { environmentStagedChanges(environmentId: $environmentId) }",
+              {"environmentId": env_id},
+          )["environmentStagedChanges"]
+
+          # Print structure only. Never print staged scalar values because they may contain secrets.
+          def shape(value, depth=0):
+              if depth > 6:
+                  return "..."
+              if isinstance(value, dict):
+                  return {key: shape(child, depth + 1) for key, child in value.items()}
+              if isinstance(value, list):
+                  examples = [shape(child, depth + 1) for child in value[:3]]
+                  return {"__list_length__": len(value), "__examples__": examples}
+              if value is None:
+                  return "null"
+              return type(value).__name__
+
+          print("Railway auth available:", auth_kind)
+          print("STAGED_CHANGE_SHAPE=" + json.dumps(shape(staged_data), sort_keys=True))
+
+          schema = gql("""
+          query SchemaProbe {
+            __schema {
+              types {
+                kind
+                name
+                fields(includeDeprecated: true) {
+                  name
+                  type { kind name ofType { kind name } }
+                }
+                inputFields {
+                  name
+                  type { kind name ofType { kind name } }
+                }
+              }
+            }
+          }
+          """)
+
+          matches = []
+          for type_info in schema["__schema"]["types"]:
+              tname = type_info.get("name") or ""
+              for collection_name in ("fields", "inputFields"):
+                  for field in type_info.get(collection_name) or []:
+                      fname = field.get("name") or ""
+                      haystack = (tname + " " + fname).lower()
+                      if "checksuite" in haystack or "check_suite" in haystack or "waitforci" in haystack or "wait_for_ci" in haystack:
+                          matches.append({"type": tname, "collection": collection_name, "field": fname, "fieldType": field.get("type")})
+          print("CHECK_SUITE_SCHEMA_MATCHES=" + json.dumps(matches, sort_keys=True))
+          PY
