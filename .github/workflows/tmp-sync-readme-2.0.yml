@@ -1,0 +1,55 @@
+name: Temporary README 2.0 Sync
+
+on:
+  push:
+    branches:
+      - release/2.0-metadata-sync
+    paths:
+      - ".github/workflows/tmp-sync-readme-2.0.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: release/2.0-metadata-sync
+
+      - name: Restore full README and apply minimal 2.0 corrections
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout origin/main -- README.md
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('README.md')
+          s = p.read_text()
+          s = s.replace('versionName:   1.9\nversionCode:   1787428688', 'versionName:   2.0\nversionCode:   1787428691')
+          s = s.replace('The signed 1.9 workflow requires the repository signing secrets before it can emit Play-uploadable APK/AAB artifacts; the keystore itself must never be committed.', 'The signed 2.0 workflow requires the repository signing secrets before it can emit Play-uploadable APK/AAB artifacts; the keystore itself must never be committed.')
+          old = '''Remaining release work includes provider-side P1 certification plus P2 polish:\n\n- configure and verify the authenticated Google Play RTDN/Pub/Sub push identity;\n- configure and test an approved operational alert receiver;\n- complete a live Play test purchase, RTDN redelivery/idempotency check, and refund/void verification;\n- deeper adversarial commerce and multiplayer load/soak testing;\n- more bespoke cosmetic artwork and animation;\n- ongoing balance, seasonal-content, and trivia-quality tuning.'''
+          new = '''Provider RTDN and operational-alert delivery are now certified in production. Remaining release work is:\n\n- enable CI-before-deploy governance for Railway and verify main-branch protection;\n- complete a live Play license-tester purchase, RTDN redelivery/idempotency check, and refund/void verification;\n- run the final `/Gaudit`;\n- complete the Play Console 2.0 rollout;\n- continue deeper adversarial commerce/multiplayer soak testing and P2 visual/content polish.'''
+          if old not in s:
+              raise SystemExit('expected hardening block not found')
+          s = s.replace(old, new)
+          p.write_text(s)
+          PY
+
+          grep 'versionName:   2.0' README.md
+          grep 'versionCode:   1787428691' README.md
+          grep 'signed 2.0 workflow' README.md
+
+      - name: Commit README correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git diff --cached --check
+          git commit -m "docs: synchronize README with 2.0 release state"
+          git push origin HEAD:release/2.0-metadata-sync
