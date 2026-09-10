@@ -35,8 +35,8 @@ jobs:
 
       - name: Verify version
         run: |
-          grep 'versionCode = 1787428688' app/build.gradle.kts
-          grep 'versionName = "1.9"' app/build.gradle.kts
+          grep 'versionCode = 1787428691' app/build.gradle.kts
+          grep 'versionName = "2.0"' app/build.gradle.kts
 
       - name: Run unit tests
         run: ./gradlew :app:testDebugUnitTest --stacktrace
@@ -49,9 +49,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-artifacts
-          cp app/build/outputs/apk/debug/app-debug.apk release-artifacts/QuizRoyaleShowdown-v1.9-code1787428688-debug.apk
-          cp app/build/outputs/apk/release/app-release-unsigned.apk release-artifacts/QuizRoyaleShowdown-v1.9-code1787428688-release-unsigned.apk
-          cp app/build/outputs/bundle/release/app-release.aab release-artifacts/QuizRoyaleShowdown-v1.9-code1787428688-release-unsigned.aab
+          cp app/build/outputs/apk/debug/app-debug.apk release-artifacts/QuizRoyaleShowdown-v2.0-code1787428691-debug.apk
+          cp app/build/outputs/apk/release/app-release-unsigned.apk release-artifacts/QuizRoyaleShowdown-v2.0-code1787428691-release-unsigned.apk
+          cp app/build/outputs/bundle/release/app-release.aab release-artifacts/QuizRoyaleShowdown-v2.0-code1787428691-release-unsigned.aab
           cd release-artifacts
           sha256sum * > SHA256SUMS.txt
           ls -lh
@@ -59,7 +59,7 @@ jobs:
       - name: Upload Android diagnostic artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: quiz-royale-android-v1.9-code1787428688-unsigned
+          name: quiz-royale-android-v2.0-code1787428691-unsigned
           path: android-quiz-royale-showdown/release-artifacts/*
           if-no-files-found: error
           retention-days: 14
