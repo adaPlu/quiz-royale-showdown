@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile, unlink, writeFile } from "node:fs/promises";
 import test from "node:test";
 import { refundReviewDeadlineState, rtdnEventKind, voidReversalAmount } from "./commerce.js";
 
@@ -58,48 +59,56 @@ test("refund review deadline boundary is stable at due-soon and overdue transiti
 });
 
 test("only exact structured productNotOwnedByUser consume failures are idempotent success", async () => {
-  const commerce = await import("./commerce.js") as unknown as {
-    isAlreadyFinalizedGooglePlayConsumeResponse?: (status: number, text: string) => boolean;
-  };
-  const classify = commerce.isAlreadyFinalizedGooglePlayConsumeResponse;
-  assert.equal(typeof classify, "function", "expected Google Play consume classifier export");
+  const commerceUrl = new URL("./commerce.js", import.meta.url);
+  const instrumentedUrl = new URL(`./commerce.consume-classifier-test-${process.pid}-${Date.now()}.mjs`, import.meta.url);
+  const source = await readFile(commerceUrl, "utf8");
+  await writeFile(instrumentedUrl, `${source}\nexport { isAlreadyFinalizedGooglePlayConsumeResponse };\n`, "utf8");
 
-  const exact = JSON.stringify({
-    error: {
-      code: 400,
-      errors: [{ domain: "androidpublisher", reason: "productNotOwnedByUser" }],
-    },
-  });
-  const wrongStatus = JSON.stringify({
-    error: {
-      code: 400,
-      errors: [{ domain: "androidpublisher", reason: "productNotOwnedByUser" }],
-    },
-  });
-  const wrongCode = JSON.stringify({
-    error: {
-      code: 403,
-      errors: [{ domain: "androidpublisher", reason: "productNotOwnedByUser" }],
-    },
-  });
-  const wrongDomain = JSON.stringify({
-    error: {
-      code: 400,
-      errors: [{ domain: "global", reason: "productNotOwnedByUser" }],
-    },
-  });
-  const unrelated = JSON.stringify({
-    error: {
-      code: 400,
-      errors: [{ domain: "androidpublisher", reason: "invalidPurchaseToken" }],
-    },
-  });
+  try {
+    const commerce = await import(instrumentedUrl.href) as {
+      isAlreadyFinalizedGooglePlayConsumeResponse: (status: number, text: string) => boolean;
+    };
+    const classify = commerce.isAlreadyFinalizedGooglePlayConsumeResponse;
 
-  assert.equal(classify!(400, exact), true);
-  assert.equal(classify!(409, wrongStatus), false);
-  assert.equal(classify!(400, wrongCode), false);
-  assert.equal(classify!(400, wrongDomain), false);
-  assert.equal(classify!(400, unrelated), false);
-  assert.equal(classify!(400, "not-json"), false);
-  assert.equal(classify!(400, JSON.stringify({ error: { code: 400, errors: "bad-shape" } })), false);
+    const exact = JSON.stringify({
+      error: {
+        code: 400,
+        errors: [{ domain: "androidpublisher", reason: "productNotOwnedByUser" }],
+      },
+    });
+    const wrongStatus = JSON.stringify({
+      error: {
+        code: 400,
+        errors: [{ domain: "androidpublisher", reason: "productNotOwnedByUser" }],
+      },
+    });
+    const wrongCode = JSON.stringify({
+      error: {
+        code: 403,
+        errors: [{ domain: "androidpublisher", reason: "productNotOwnedByUser" }],
+      },
+    });
+    const wrongDomain = JSON.stringify({
+      error: {
+        code: 400,
+        errors: [{ domain: "global", reason: "productNotOwnedByUser" }],
+      },
+    });
+    const unrelated = JSON.stringify({
+      error: {
+        code: 400,
+        errors: [{ domain: "androidpublisher", reason: "invalidPurchaseToken" }],
+      },
+    });
+
+    assert.equal(classify(400, exact), true);
+    assert.equal(classify(409, wrongStatus), false);
+    assert.equal(classify(400, wrongCode), false);
+    assert.equal(classify(400, wrongDomain), false);
+    assert.equal(classify(400, unrelated), false);
+    assert.equal(classify(400, "not-json"), false);
+    assert.equal(classify(400, JSON.stringify({ error: { code: 400, errors: "bad-shape" } })), false);
+  } finally {
+    await unlink(instrumentedUrl).catch(() => undefined);
+  }
 });
