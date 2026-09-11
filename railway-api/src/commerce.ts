@@ -1237,12 +1237,12 @@ function isAlreadyFinalizedGooglePlayConsumeResponse(status: number, text: strin
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
     const error = (payload as { error?: unknown }).error;
     if (!error || typeof error !== "object" || Array.isArray(error)) return false;
-    const structured = error as { code?: unknown; errors?: unknown };
-    if (structured.code !== 400 || !Array.isArray(structured.errors)) return false;
+    const structured = error as { errors?: unknown };
+    if (!Array.isArray(structured.errors)) return false;
     return structured.errors.some((entry) => {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
-      const detail = entry as { domain?: unknown; reason?: unknown };
-      return detail.domain === "androidpublisher" && detail.reason === "productNotOwnedByUser";
+      const detail = entry as { reason?: unknown };
+      return detail.reason === "productNotOwnedByUser";
     });
   } catch {
     return false;
@@ -1465,7 +1465,7 @@ async function googleAccessToken(credentials: ServiceAccount): Promise<string> {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      grant_type: "urn:ietf:params:oauth-grant-type:jwt-bearer",
       assertion,
     }),
   });
