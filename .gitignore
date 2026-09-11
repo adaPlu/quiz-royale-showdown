@@ -3,6 +3,7 @@ node_modules
 .expo
 .rork
 .claude/
+.worktrees/
 android/
 backend/coverage/
 backend/dist/
