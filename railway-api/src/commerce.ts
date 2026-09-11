@@ -1221,10 +1221,30 @@ async function consumeWithGooglePlay(productId: string, purchaseToken: string): 
     });
     if (response.ok) return true;
     const text = await response.text();
-    console.warn("Google Play consume failed", response.status, text.slice(0, 300));
+    if (isAlreadyFinalizedGooglePlayConsumeResponse(response.status, text)) return true;
+    console.warn("Google Play consume failed", response.status);
     return false;
   } catch (error) {
     console.warn("Google Play consume unavailable", (error as Error)?.message);
+    return false;
+  }
+}
+
+function isAlreadyFinalizedGooglePlayConsumeResponse(status: number, text: string): boolean {
+  if (status !== 400) return false;
+  try {
+    const payload: unknown = JSON.parse(text);
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+    const error = (payload as { error?: unknown }).error;
+    if (!error || typeof error !== "object" || Array.isArray(error)) return false;
+    const structured = error as { code?: unknown; errors?: unknown };
+    if (structured.code !== 400 || !Array.isArray(structured.errors)) return false;
+    return structured.errors.some((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+      const detail = entry as { domain?: unknown; reason?: unknown };
+      return detail.domain === "androidpublisher" && detail.reason === "productNotOwnedByUser";
+    });
+  } catch {
     return false;
   }
 }
