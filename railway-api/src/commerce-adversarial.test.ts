@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile, unlink, writeFile } from "node:fs/promises";
 import test from "node:test";
 import { refundReviewDeadlineState, rtdnEventKind, voidReversalAmount } from "./commerce.js";
 
@@ -55,4 +56,50 @@ test("refund review deadline boundary is stable at due-soon and overdue transiti
   assert.equal(refundReviewDeadlineState(now + 1, now), "due_soon");
   assert.equal(refundReviewDeadlineState(now, now), "overdue");
   assert.equal(refundReviewDeadlineState(now - 1, now), "overdue");
+});
+
+test("only exact structured productNotOwnedByUser consume failures are idempotent success", async () => {
+  const commerceUrl = new URL("./commerce.js", import.meta.url);
+  const instrumentedUrl = new URL(`./commerce.consume-classifier-test-${process.pid}-${Date.now()}.mjs`, import.meta.url);
+  const source = await readFile(commerceUrl, "utf8");
+  await writeFile(instrumentedUrl, `${source}\nexport { isAlreadyFinalizedGooglePlayConsumeResponse };\n`, "utf8");
+
+  try {
+    const commerce = await import(instrumentedUrl.href) as {
+      isAlreadyFinalizedGooglePlayConsumeResponse: (status: number, text: string) => boolean;
+    };
+    const classify = commerce.isAlreadyFinalizedGooglePlayConsumeResponse;
+
+    const exact = JSON.stringify({
+      error: {
+        errors: [{ reason: "productNotOwnedByUser" }],
+      },
+    });
+    const fullGoogleShape = JSON.stringify({
+      error: {
+        code: 400,
+        errors: [{ domain: "androidpublisher", reason: "productNotOwnedByUser" }],
+      },
+    });
+    const wrongStatus = JSON.stringify({
+      error: {
+        errors: [{ reason: "productNotOwnedByUser" }],
+      },
+    });
+    const unrelated = JSON.stringify({
+      error: {
+        errors: [{ reason: "invalidPurchaseToken" }],
+      },
+    });
+
+    assert.equal(classify(400, exact), true);
+    assert.equal(classify(400, fullGoogleShape), true);
+    assert.equal(classify(409, wrongStatus), false);
+    assert.equal(classify(400, unrelated), false);
+    assert.equal(classify(400, "not-json"), false);
+    assert.equal(classify(400, JSON.stringify({ error: { errors: "bad-shape" } })), false);
+    assert.equal(classify(400, JSON.stringify({ errors: [{ reason: "productNotOwnedByUser" }] })), false);
+  } finally {
+    await unlink(instrumentedUrl).catch(() => undefined);
+  }
 });
