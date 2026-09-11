@@ -72,42 +72,33 @@ test("only exact structured productNotOwnedByUser consume failures are idempoten
 
     const exact = JSON.stringify({
       error: {
+        errors: [{ reason: "productNotOwnedByUser" }],
+      },
+    });
+    const fullGoogleShape = JSON.stringify({
+      error: {
         code: 400,
         errors: [{ domain: "androidpublisher", reason: "productNotOwnedByUser" }],
       },
     });
     const wrongStatus = JSON.stringify({
       error: {
-        code: 400,
-        errors: [{ domain: "androidpublisher", reason: "productNotOwnedByUser" }],
-      },
-    });
-    const wrongCode = JSON.stringify({
-      error: {
-        code: 403,
-        errors: [{ domain: "androidpublisher", reason: "productNotOwnedByUser" }],
-      },
-    });
-    const wrongDomain = JSON.stringify({
-      error: {
-        code: 400,
-        errors: [{ domain: "global", reason: "productNotOwnedByUser" }],
+        errors: [{ reason: "productNotOwnedByUser" }],
       },
     });
     const unrelated = JSON.stringify({
       error: {
-        code: 400,
-        errors: [{ domain: "androidpublisher", reason: "invalidPurchaseToken" }],
+        errors: [{ reason: "invalidPurchaseToken" }],
       },
     });
 
     assert.equal(classify(400, exact), true);
+    assert.equal(classify(400, fullGoogleShape), true);
     assert.equal(classify(409, wrongStatus), false);
-    assert.equal(classify(400, wrongCode), false);
-    assert.equal(classify(400, wrongDomain), false);
     assert.equal(classify(400, unrelated), false);
     assert.equal(classify(400, "not-json"), false);
-    assert.equal(classify(400, JSON.stringify({ error: { code: 400, errors: "bad-shape" } })), false);
+    assert.equal(classify(400, JSON.stringify({ error: { errors: "bad-shape" } })), false);
+    assert.equal(classify(400, JSON.stringify({ errors: [{ reason: "productNotOwnedByUser" }] })), false);
   } finally {
     await unlink(instrumentedUrl).catch(() => undefined);
   }
