@@ -30,10 +30,17 @@ SHA prefix. The health payload must also report PostgreSQL as `connected`.
 - `GOOGLE_PLAY_REFUND_REVIEW_ALERT_INTERVAL_MS`: optional pending-refund alert interval override; minimum one minute.
 - `PGSSL`: set to `disable` only for local databases that do not support TLS.
 - `PGSSL_REJECT_UNAUTHORIZED`: set to `false` only when a managed database requires TLS without trusted certificate validation.
-- `PASSWORD_RESET_EMAIL_ENDPOINT`: optional email-provider webhook endpoint.
-- `PASSWORD_RESET_EMAIL_TOKEN`: optional bearer token for the email endpoint.
+- `PASSWORD_RESET_EMAIL_ENDPOINT`: optional email-provider HTTP endpoint. The API POSTs JSON with `to`, `from`, `subject`, and `text` fields.
+- `PASSWORD_RESET_EMAIL_TOKEN`: optional bearer token sent to the password-reset email endpoint.
+- `PASSWORD_RESET_FROM`: verified sender address used for password-reset email. Configure this in production whenever the email endpoint is enabled.
 - `PASSWORD_RESET_BASE_URL`: optional deep link / reset URL base.
 - `CORS_ORIGIN`: optional CORS origin.
+
+Password-reset requests intentionally return the same public success response
+whether or not an account exists. Successful email-provider responses are
+logged only as a sanitized provider-acceptance event containing the internal
+user ID and provider HTTP status; reset codes, recipient addresses, and
+provider credentials must never be logged.
 
 ## RTDN production contract
 
