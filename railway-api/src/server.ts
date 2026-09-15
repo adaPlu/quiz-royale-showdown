@@ -2040,6 +2040,7 @@ async function sendPasswordResetEmail(record: UserRow, token: string): Promise<v
     }),
   });
   if (!response.ok) throw new Error(`email provider returned ${response.status}`);
+  console.info("password reset email accepted", record.user_id, response.status);
 }
 
 function authorizedInternal(request: http.IncomingMessage): boolean {
