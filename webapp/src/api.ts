@@ -133,6 +133,22 @@ export async function login(identifier: string, password: string): Promise<Ident
   return rememberUser(await jsonRequest<AuthResult>(`${RAILWAY_API_URL}/auth/login`, { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ identifier, password }) }));
 }
 
+export async function requestPasswordReset(identifier: string): Promise<void> {
+  await jsonRequest<{ ok: boolean }>(`${RAILWAY_API_URL}/auth/forgot-password`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ identifier }),
+  });
+}
+
+export async function resetPassword(token: string, password: string): Promise<Identity> {
+  return rememberUser(await jsonRequest<AuthResult>(`${RAILWAY_API_URL}/auth/reset-password`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ token, password }),
+  }));
+}
+
 export async function register(username: string, email: string, password: string, identity: Identity): Promise<Identity> {
   const transfer = identity.kind === "guest" && Boolean(identity.guest.guestSecret);
   const result = await jsonRequest<AuthResult>(`${RAILWAY_API_URL}/auth/register`, {
