@@ -84,5 +84,5 @@ test("guest can request and complete a password reset from the web profile", asy
   await page.getByLabel("New password").fill("NewPassword123!");
   await page.getByRole("button", { name: "RESET PASSWORD" }).click();
 
-  await expect(page.getByText("ResetUser")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "ResetUser", exact: true })).toBeVisible();
 });
