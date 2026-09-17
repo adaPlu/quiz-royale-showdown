@@ -24,6 +24,8 @@ import {
   loadStore,
   login,
   logout,
+  requestPasswordReset,
+  resetPassword,
   openMatchSocket,
   purchaseStoreItem,
   refreshIdentity,
@@ -574,20 +576,121 @@ function seasonRewardText(reward: Record<string, unknown>): string {
 }
 
 function ProfileScreen({ identity, onIdentity, onMessage }: { identity: Identity; onIdentity: (identity: Identity) => void; onMessage: (message: string | null) => void }) {
-  const [mode, setMode] = useState<"login" | "register">("register");
+  const [mode, setMode] = useState<"login" | "register" | "forgot" | "reset">("register");
   const [busy, setBusy] = useState(false);
+
   if (identity.kind === "guest") {
-    async function submit(event: FormEvent<HTMLFormElement>) {
-      event.preventDefault(); setBusy(true); onMessage(null); const form = new FormData(event.currentTarget);
-      try { if (mode === "login") onIdentity(await login(String(form.get("identifier") ?? ""), String(form.get("password") ?? ""))); else onIdentity(await register(String(form.get("username") ?? ""), String(form.get("email") ?? ""), String(form.get("password") ?? ""), identity)); }
-      catch (error) { onMessage(error instanceof Error ? error.message : "Authentication failed."); }
-      finally { setBusy(false); }
+    function changeMode(nextMode: "login" | "register" | "forgot" | "reset") {
+      onMessage(null);
+      setMode(nextMode);
     }
-    return <ArenaPage title="PROFILE" subtitle="Save your progress permanently"><div className="auth-switch" role="tablist" aria-label="Account action"><button role="tab" aria-selected={mode === "register"} className={mode === "register" ? "active" : ""} onClick={() => setMode("register")}><UserPlus size={18} aria-hidden="true" /> REGISTER</button><button role="tab" aria-selected={mode === "login"} className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}><LogIn size={18} aria-hidden="true" /> SIGN IN</button></div><form className="arena-card auth-form" onSubmit={submit}>{mode === "register" ? <><label>Username<input name="username" autoComplete="username" required minLength={3} /></label><label>Email<input name="email" type="email" autoComplete="email" required /></label></> : <label>Email or username<input name="identifier" autoComplete="username" required /></label>}<label>Password<input name="password" type="password" autoComplete={mode === "register" ? "new-password" : "current-password"} required minLength={8} /></label><button className="primary-button" disabled={busy}>{busy ? "PLEASE WAIT…" : mode === "register" ? "REGISTER & KEEP PROGRESS" : "SIGN IN"}</button></form></ArenaPage>;
+
+    async function submit(event: FormEvent<HTMLFormElement>) {
+      event.preventDefault();
+      setBusy(true);
+      onMessage(null);
+      const form = new FormData(event.currentTarget);
+      try {
+        if (mode === "login") {
+          onIdentity(await login(String(form.get("identifier") ?? ""), String(form.get("password") ?? "")));
+        } else if (mode === "register") {
+          onIdentity(await register(
+            String(form.get("username") ?? ""),
+            String(form.get("email") ?? ""),
+            String(form.get("password") ?? ""),
+            identity,
+          ));
+        } else if (mode === "forgot") {
+          await requestPasswordReset(String(form.get("identifier") ?? ""));
+          onMessage("If that account exists, a reset email has been sent.");
+          setMode("reset");
+        } else {
+          onIdentity(await resetPassword(
+            String(form.get("token") ?? ""),
+            String(form.get("password") ?? ""),
+          ));
+        }
+      } catch (error) {
+        onMessage(error instanceof Error ? error.message : "Authentication failed.");
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    const subtitle = mode === "forgot"
+      ? "Recover your account"
+      : mode === "reset"
+        ? "Create a new password"
+        : "Save your progress permanently";
+
+    return (
+      <ArenaPage title="PROFILE" subtitle={subtitle}>
+        {(mode === "register" || mode === "login") && (
+          <div className="auth-switch" role="tablist" aria-label="Account action">
+            <button role="tab" aria-selected={mode === "register"} className={mode === "register" ? "active" : ""} onClick={() => changeMode("register")}>
+              <UserPlus size={18} aria-hidden="true" /> REGISTER
+            </button>
+            <button role="tab" aria-selected={mode === "login"} className={mode === "login" ? "active" : ""} onClick={() => changeMode("login")}>
+              <LogIn size={18} aria-hidden="true" /> SIGN IN
+            </button>
+          </div>
+        )}
+
+        <form className="arena-card auth-form" onSubmit={submit}>
+          {mode === "register" && (
+            <>
+              <label>Username<input name="username" autoComplete="username" required minLength={3} /></label>
+              <label>Email<input name="email" type="email" autoComplete="email" required /></label>
+              <label>Password<input name="password" type="password" autoComplete="new-password" required minLength={8} /></label>
+            </>
+          )}
+
+          {mode === "login" && (
+            <>
+              <label>Email or username<input name="identifier" autoComplete="username" required /></label>
+              <label>Password<input name="password" type="password" autoComplete="current-password" required minLength={8} /></label>
+              <button type="button" className="secondary-button" onClick={() => changeMode("forgot")}>Forgot password?</button>
+            </>
+          )}
+
+          {mode === "forgot" && (
+            <>
+              <label>Email or username<input name="identifier" autoComplete="username" required /></label>
+              <p>Enter the email address or username on your Quiz Royale account.</p>
+            </>
+          )}
+
+          {mode === "reset" && (
+            <>
+              <label>Reset code<input name="token" autoComplete="one-time-code" required /></label>
+              <label>New password<input name="password" type="password" autoComplete="new-password" required minLength={8} /></label>
+            </>
+          )}
+
+          <button className="primary-button" disabled={busy}>
+            {busy
+              ? "PLEASE WAIT…"
+              : mode === "register"
+                ? "REGISTER & KEEP PROGRESS"
+                : mode === "login"
+                  ? "SIGN IN"
+                  : mode === "forgot"
+                    ? "SEND RESET EMAIL"
+                    : "RESET PASSWORD"}
+          </button>
+
+          {(mode === "forgot" || mode === "reset") && (
+            <button type="button" className="secondary-button" onClick={() => changeMode("login")} disabled={busy}>BACK TO SIGN IN</button>
+          )}
+        </form>
+      </ArenaPage>
+    );
   }
+
   const stats = identity.profile.stats;
   return <ArenaPage title="PROFILE" subtitle={identity.profile.username}><section className="arena-card profile-card"><UserRound size={36} className="gold-text" aria-hidden="true" /><div><h2>{identity.profile.username}</h2><p>{identity.profile.email}</p></div></section><div className="stat-grid"><Stat label="POINTS" value={stats.totalPoints} /><Stat label="WINS" value={stats.wins} /><Stat label="CORRECT" value={stats.correctAnswers} /><Stat label="RANK" value={stats.bestRank ?? "—"} /></div><FriendsPanel identity={identity} onIdentity={onIdentity} /><button className="secondary-button" onClick={async () => onIdentity(await logout(identity))}>SIGN OUT</button></ArenaPage>;
 }
+
 
 function MatchScreen({ live, socket, connectionState, onExit }: { live: LiveMatch; socket: WebSocket | null; connectionState: ConnectionState; onExit: () => void }) {
   const { match, you } = live;
