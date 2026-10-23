@@ -1017,3 +1017,8 @@ All rights reserved unless otherwise specified by the repository owner.
 GitHub: `adaPlu`
 
 Repository: `adaPlu/quiz-royale-showdown`
+
+
+## License
+
+**Proprietary commercial software — all rights reserved.** This repository is not open source. Commercial use, copying, modification, or redistribution of the original owned code and assets requires a separate written license from the owner. See [LICENSE](LICENSE).
