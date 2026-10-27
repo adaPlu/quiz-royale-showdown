@@ -1,4 +1,5 @@
 import http from "node:http";
+import { isIP } from "node:net";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { URL, pathToFileURL } from "node:url";
 import { z } from "zod";
@@ -2107,6 +2108,12 @@ async function rateLimited(
 }
 
 function clientAddress(request: http.IncomingMessage): string {
+  const railwayRealIp = request.headers["x-real-ip"];
+  if (typeof railwayRealIp === "string") {
+    const candidate = railwayRealIp.trim();
+    if (isIP(candidate)) return candidate;
+  }
+
   const forwarded = process.env.TRUST_PROXY === "true" ? request.headers["x-forwarded-for"] : undefined;
   if (typeof forwarded === "string" && forwarded.trim()) return forwarded.split(",")[0]!.trim();
   return request.socket.remoteAddress ?? "unknown";
