@@ -21,6 +21,9 @@ env:
   MATCH_API_URL: https://quiz-royale-functions.adapluguez.workers.dev
   CLOUDFLARE_PAGES_PROJECT: quiz-royale-showdown
   CLOUDFLARE_PAGES_BRANCH: main
+  # Last production Worker version freshly verified by the 2026-09-17 release smoke.
+  # Used only as an emergency rollback target when required secret bindings are absent.
+  WORKER_RECOVERY_VERSION_ID: f6311414-7685-4af9-831a-dcf492e8a8f9
 
 jobs:
   worker:
@@ -32,6 +35,8 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -47,18 +52,86 @@ jobs:
       - name: Install Worker dependencies
         run: npm ci --prefix functions
 
+      - name: Detect Worker source changes
+        id: worker_changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          changed=true
+          if [ "${{ github.event_name }}" = "push" ]; then
+            before="${{ github.event.before }}"
+            if [ -n "$before" ] && [ "$before" != "0000000000000000000000000000000000000000" ]; then
+              git cat-file -e "$before^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$before"
+              if git diff --quiet "$before" "${{ github.sha }}" -- functions/; then
+                changed=false
+              fi
+            fi
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "Worker sources changed: $changed"
+
+      - name: Restore last verified Worker if required bindings are missing
+        shell: bash
+        working-directory: functions
+        run: |
+          set -euo pipefail
+          healthy=false
+          code=$(curl -sS -o /tmp/pre-worker-health.json -w '%{http_code}' \
+            "$MATCH_API_URL/health" -H "Origin: $PAGES_ORIGIN" || true)
+          if [ "$code" = "200" ] && jq -e '
+            .ok == true
+            and .configuration.railwayApiUrl == true
+            and .configuration.railwayInternalToken == true
+            and .configuration.matchRoomTicketSecret == true
+          ' /tmp/pre-worker-health.json >/dev/null; then
+            healthy=true
+          fi
+
+          if [ "$healthy" = "true" ]; then
+            echo "Current Worker bindings are healthy"
+            exit 0
+          fi
+
+          echo "::warning::Current Worker is missing required production bindings; rolling back to the last verified-good version"
+          npm exec -- wrangler rollback "$WORKER_RECOVERY_VERSION_ID" \
+            --message "Automated release recovery: restore verified production bindings"
+
+          for attempt in $(seq 1 24); do
+            code=$(curl -sS -o /tmp/recovered-worker-health.json -w '%{http_code}' \
+              "$MATCH_API_URL/health" -H "Origin: $PAGES_ORIGIN" || true)
+            if [ "$code" = "200" ] && jq -e '
+              .ok == true
+              and .configuration.railwayApiUrl == true
+              and .configuration.railwayInternalToken == true
+              and .configuration.matchRoomTicketSecret == true
+            ' /tmp/recovered-worker-health.json >/dev/null; then
+              echo "Verified-good Worker version restored"
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "::error::Rollback did not restore required Worker bindings"
+          cat /tmp/recovered-worker-health.json || true
+          exit 1
+
       - name: Test Worker
+        if: steps.worker_changes.outputs.changed == 'true'
         run: npm test --prefix functions
 
       - name: Build Worker deployment bundle
+        if: steps.worker_changes.outputs.changed == 'true'
         working-directory: functions
         run: npm exec -- wrangler deploy --dry-run
 
       - name: Deploy Worker without replacing dashboard secrets
+        if: steps.worker_changes.outputs.changed == 'true'
         working-directory: functions
         run: npm exec -- wrangler deploy --keep-vars
 
-      - name: Verify deployed Worker version and configuration
+      - name: Verify current or deployed Worker version and configuration
+        id: verify_worker
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -97,6 +170,38 @@ jobs:
           cat /tmp/worker-ticket.json || true
           exit 1
 
+      - name: Roll back Worker after failed post-deploy verification
+        if: steps.verify_worker.outcome == 'failure' && steps.worker_changes.outputs.changed == 'true'
+        working-directory: functions
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm exec -- wrangler rollback "$WORKER_RECOVERY_VERSION_ID" \
+            --message "Automated rollback after failed production Worker verification"
+          for attempt in $(seq 1 24); do
+            code=$(curl -sS -o /tmp/rollback-worker-health.json -w '%{http_code}' \
+              "$MATCH_API_URL/health" -H "Origin: $PAGES_ORIGIN" || true)
+            if [ "$code" = "200" ] && jq -e '
+              .ok == true
+              and .configuration.railwayApiUrl == true
+              and .configuration.railwayInternalToken == true
+              and .configuration.matchRoomTicketSecret == true
+            ' /tmp/rollback-worker-health.json >/dev/null; then
+              echo "Production Worker restored after failed deploy"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Automatic Worker rollback did not restore production health"
+          exit 1
+
+      - name: Fail release when new Worker was rolled back
+        if: steps.verify_worker.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "::error::New Worker failed production verification. Production was rolled back to the last verified-good Worker."
+          exit 1
+
   pages:
     name: Build and deploy Pages after Worker
     needs: worker
@@ -107,6 +212,8 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -121,16 +228,38 @@ jobs:
           test -n "$CLOUDFLARE_API_TOKEN" || { echo "::error::Missing CLOUDFLARE_API_TOKEN"; exit 1; }
           test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "::error::Missing CLOUDFLARE_ACCOUNT_ID"; exit 1; }
 
+      - name: Detect web client changes
+        id: web_changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          changed=true
+          if [ "${{ github.event_name }}" = "push" ]; then
+            before="${{ github.event.before }}"
+            if [ -n "$before" ] && [ "$before" != "0000000000000000000000000000000000000000" ]; then
+              git cat-file -e "$before^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$before"
+              if git diff --quiet "$before" "${{ github.sha }}" -- webapp/; then
+                changed=false
+              fi
+            fi
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "Web client changed: $changed"
+
       - name: Install locked web dependencies
+        if: steps.web_changes.outputs.changed == 'true'
         run: npm ci --prefix webapp
 
       - name: Build production web client
+        if: steps.web_changes.outputs.changed == 'true'
         run: npm run build --prefix webapp
 
       - name: Install locked deployment CLI
+        if: steps.web_changes.outputs.changed == 'true'
         run: npm ci --prefix functions
 
       - name: Deploy Pages bundle
+        if: steps.web_changes.outputs.changed == 'true'
         working-directory: webapp
         run: >-
           ../functions/node_modules/.bin/wrangler pages deploy dist
