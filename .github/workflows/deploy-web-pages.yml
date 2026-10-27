@@ -10,8 +10,6 @@ on:
       - ".github/scripts/live-web-multiplayer-smoke.mjs"
       - ".github/workflows/deploy-web-pages.yml"
       - ".github/workflows/release-web-production.yml"
-      - ".github/workflows/ui-web-test.yml"
-      - ".github/workflows/codeql.yml"
   workflow_dispatch:
 
 permissions:
