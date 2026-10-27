@@ -1,15 +1,17 @@
 name = "quiz-royale-functions"
 main = "app.ts"
 compatibility_date = "2026-08-22"
+keep_vars = true
 
 [vars]
 ENVIRONMENT = "production"
 RAILWAY_API_URL = "https://railway-api-production-5772.up.railway.app"
 
-# Required secrets:
-#   wrangler secret put MATCH_ROOM_TICKET_SECRET
-#   wrangler secret put RAILWAY_INTERNAL_TOKEN
-#
+# Required production secrets are declared by name only. Values remain encrypted
+# in Cloudflare and are never stored in source control.
+[secrets]
+required = ["MATCH_ROOM_TICKET_SECRET", "RAILWAY_INTERNAL_TOKEN"]
+
 # Optional review account vars:
 #   GOOGLE_PLAY_REVIEW_EMAIL = "google-reviewer@quizroyale.gg"
 #   GOOGLE_PLAY_REVIEW_USERNAME = "google_reviewer"
