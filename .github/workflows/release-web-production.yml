@@ -30,6 +30,9 @@ jobs:
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      RECOVERY_RAILWAY_INTERNAL_TOKEN: ${{ secrets.RAILWAY_INTERNAL_TOKEN }}
+      RECOVERY_INTERNAL_API_TOKEN: ${{ secrets.INTERNAL_API_TOKEN }}
+      RECOVERY_MATCH_ROOM_TICKET_SECRET: ${{ secrets.MATCH_ROOM_TICKET_SECRET }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -67,7 +70,68 @@ jobs:
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
           echo "Worker sources changed: $changed"
 
+      - name: Self-heal missing Worker secret bindings
+        id: secret_recovery
+        shell: bash
+        working-directory: functions
+        run: |
+          set -euo pipefail
+
+          read_health() {
+            curl -sS -o /tmp/worker-health.json -w '%{http_code}' \
+              "$MATCH_API_URL/health" -H "Origin: $PAGES_ORIGIN" || true
+          }
+
+          code=$(read_health)
+          has_internal=false
+          has_ticket=false
+          if [ "$code" = "200" ]; then
+            jq -e '.configuration.railwayInternalToken == true' /tmp/worker-health.json >/dev/null && has_internal=true || true
+            jq -e '.configuration.matchRoomTicketSecret == true' /tmp/worker-health.json >/dev/null && has_ticket=true || true
+          fi
+
+          if [ "$has_internal" != "true" ]; then
+            internal_token="${RECOVERY_RAILWAY_INTERNAL_TOKEN:-${RECOVERY_INTERNAL_API_TOKEN:-}}"
+            if [ -n "$internal_token" ]; then
+              printf '%s' "$internal_token" | npm exec -- wrangler secret put RAILWAY_INTERNAL_TOKEN
+              echo "Re-applied RAILWAY_INTERNAL_TOKEN from GitHub production secrets"
+            else
+              echo "::warning::No GitHub production secret is available for RAILWAY_INTERNAL_TOKEN"
+            fi
+          fi
+
+          if [ "$has_ticket" != "true" ]; then
+            if [ -n "${RECOVERY_MATCH_ROOM_TICKET_SECRET:-}" ]; then
+              printf '%s' "$RECOVERY_MATCH_ROOM_TICKET_SECRET" | npm exec -- wrangler secret put MATCH_ROOM_TICKET_SECRET
+              echo "Re-applied MATCH_ROOM_TICKET_SECRET from GitHub production secrets"
+            else
+              generated_ticket_secret=$(openssl rand -hex 32)
+              printf '%s' "$generated_ticket_secret" | npm exec -- wrangler secret put MATCH_ROOM_TICKET_SECRET
+              unset generated_ticket_secret
+              echo "Generated and installed a fresh MATCH_ROOM_TICKET_SECRET"
+            fi
+          fi
+
+          for attempt in $(seq 1 18); do
+            code=$(read_health)
+            if [ "$code" = "200" ] && jq -e '
+              .ok == true
+              and .configuration.railwayApiUrl == true
+              and .configuration.railwayInternalToken == true
+              and .configuration.matchRoomTicketSecret == true
+            ' /tmp/worker-health.json >/dev/null; then
+              echo "healthy=true" >> "$GITHUB_OUTPUT"
+              echo "Worker secret bindings restored"
+              exit 0
+            fi
+            sleep 3
+          done
+
+          echo "healthy=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::Worker is still missing at least one required binding after secret self-heal"
+
       - name: Select newest rollback target with required secret bindings
+        if: steps.secret_recovery.outputs.healthy != 'true'
         id: recovery_version
         shell: bash
         working-directory: functions
@@ -104,6 +168,7 @@ jobs:
           exit 1
 
       - name: Restore last verified Worker if required bindings are missing
+        if: steps.secret_recovery.outputs.healthy != 'true'
         shell: bash
         working-directory: functions
         env:
