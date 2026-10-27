@@ -94,6 +94,7 @@ jobs:
 
           echo "::warning::Current Worker is missing required production bindings; rolling back to the last verified-good version"
           npm exec -- wrangler rollback "$WORKER_RECOVERY_VERSION_ID" \
+            --yes \
             --message "Automated release recovery: restore verified production bindings"
 
           for attempt in $(seq 1 24); do
@@ -177,6 +178,7 @@ jobs:
         run: |
           set -euo pipefail
           npm exec -- wrangler rollback "$WORKER_RECOVERY_VERSION_ID" \
+            --yes \
             --message "Automated rollback after failed production Worker verification"
           for attempt in $(seq 1 24); do
             code=$(curl -sS -o /tmp/rollback-worker-health.json -w '%{http_code}' \
