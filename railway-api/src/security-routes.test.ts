@@ -87,6 +87,33 @@ test("internal token comparison accepts only exact shared secret", () => {
   assert.equal(constantTimeSecretEqual("correct-token-extra", "correct-token"), false);
 });
 
+test("Railway X-Real-IP keeps auth rate limits isolated per client", async () => {
+  const buckets = new Map<string, number>();
+
+  await withMockPool(async (sql: string, params?: unknown[]) => {
+    if (!sql.includes("auth_rate_limits")) throw new Error(`unexpected database query: ${sql}`);
+    const key = String(params?.[0] ?? "");
+    const count = (buckets.get(key) ?? 0) + 1;
+    buckets.set(key, count);
+    return { rowCount: 1, rows: [{ count, reset_at: Date.now() + 60_000 }] };
+  }, async () => {
+    const firstClient = { "X-Real-IP": "203.0.113.10" };
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const response = await request("POST", "/auth/login", { headers: firstClient, body: {} });
+      assert.equal(response.status, 400);
+    }
+
+    const blocked = await request("POST", "/auth/login", { headers: firstClient, body: {} });
+    assert.equal(blocked.status, 429);
+
+    const otherClient = await request("POST", "/auth/login", {
+      headers: { "X-Real-IP": "203.0.113.11" },
+      body: {},
+    });
+    assert.equal(otherClient.status, 400, "a different Railway client IP must have an independent rate-limit bucket");
+  });
+});
+
 test("guest names keep incrementing beyond the first thousand active challengers", async () => {
   const taken = new Set<string>();
   for (let i = 1; i <= 1_000; i += 1) {

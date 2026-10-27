@@ -94,6 +94,7 @@ jobs:
             --ram=4096
 
       - name: Preserve SARIF results
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: codeql-${{ matrix.sarif }}-sarif
