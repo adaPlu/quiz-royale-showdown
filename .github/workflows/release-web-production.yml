@@ -21,9 +21,6 @@ env:
   MATCH_API_URL: https://quiz-royale-functions.adapluguez.workers.dev
   CLOUDFLARE_PAGES_PROJECT: quiz-royale-showdown
   CLOUDFLARE_PAGES_BRANCH: main
-  # Last production Worker version freshly verified by the 2026-09-17 release smoke.
-  # Used only as an emergency rollback target when required secret bindings are absent.
-  WORKER_RECOVERY_VERSION_ID: f6311414-7685-4af9-831a-dcf492e8a8f9
 
 jobs:
   worker:
@@ -70,9 +67,47 @@ jobs:
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
           echo "Worker sources changed: $changed"
 
+      - name: Select newest rollback target with required secret bindings
+        id: recovery_version
+        shell: bash
+        working-directory: functions
+        run: |
+          set -euo pipefail
+          npm exec -- wrangler deployments list --json > /tmp/worker-deployments.json
+
+          mapfile -t candidate_ids < <(
+            jq -r '
+              reverse
+              | [.[].versions[]? | select(.percentage == 100) | .version_id]
+              | unique
+              | reverse[]
+            ' /tmp/worker-deployments.json
+          )
+
+          for version_id in "${candidate_ids[@]}"; do
+            if ! npm exec -- wrangler versions view "$version_id" --json > /tmp/worker-version.json 2>/tmp/worker-version.err; then
+              continue
+            fi
+
+            if jq -e '
+              ([.resources.bindings[]? | select(.type == "secret_text") | .name] | index("RAILWAY_INTERNAL_TOKEN") != null)
+              and
+              ([.resources.bindings[]? | select(.type == "secret_text") | .name] | index("MATCH_ROOM_TICKET_SECRET") != null)
+            ' /tmp/worker-version.json >/dev/null; then
+              echo "version_id=$version_id" >> "$GITHUB_OUTPUT"
+              echo "Selected recent Worker version with both required secret bindings"
+              exit 0
+            fi
+          done
+
+          echo "::error::No recent deployable Worker version contains both required secret bindings"
+          exit 1
+
       - name: Restore last verified Worker if required bindings are missing
         shell: bash
         working-directory: functions
+        env:
+          RECOVERY_VERSION_ID: ${{ steps.recovery_version.outputs.version_id }}
         run: |
           set -euo pipefail
           healthy=false
@@ -93,7 +128,7 @@ jobs:
           fi
 
           echo "::warning::Current Worker is missing required production bindings; rolling back to the last verified-good version"
-          npm exec -- wrangler rollback "$WORKER_RECOVERY_VERSION_ID" \
+          npm exec -- wrangler rollback "$RECOVERY_VERSION_ID" \
             --yes \
             --message "Automated release recovery: restore verified production bindings"
 
@@ -175,9 +210,11 @@ jobs:
         if: steps.verify_worker.outcome == 'failure' && steps.worker_changes.outputs.changed == 'true'
         working-directory: functions
         shell: bash
+        env:
+          RECOVERY_VERSION_ID: ${{ steps.recovery_version.outputs.version_id }}
         run: |
           set -euo pipefail
-          npm exec -- wrangler rollback "$WORKER_RECOVERY_VERSION_ID" \
+          npm exec -- wrangler rollback "$RECOVERY_VERSION_ID" \
             --yes \
             --message "Automated rollback after failed production Worker verification"
           for attempt in $(seq 1 24); do
